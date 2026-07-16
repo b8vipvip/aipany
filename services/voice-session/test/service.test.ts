@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 
-import { VoiceSessionError } from "../src/errors.js";
 import { VoiceSessionService } from "../src/service.js";
 import type { RealtimeProvider } from "../src/types.js";
 
@@ -62,7 +61,7 @@ describe("VoiceSessionService", () => {
           capabilities: ["audio_input"],
         },
       }),
-    ).rejects.toMatchObject<Partial<VoiceSessionError>>({
+    ).rejects.toMatchObject({
       code: "MISSING_DEVICE_CAPABILITY",
       statusCode: 422,
     });
