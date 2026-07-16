@@ -1,7 +1,15 @@
+import { resolve } from "node:path";
+
+import { config as loadDotEnv } from "dotenv";
+
 import { buildApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { OpenAIRealtimeProvider } from "./providers/openai-realtime-provider.js";
 import { VoiceSessionService } from "./service.js";
+
+// pnpm / Turborepo 通常会在当前 package 目录执行脚本，因此同时尝试当前目录和仓库根目录。
+loadDotEnv({ path: resolve(process.cwd(), ".env") });
+loadDotEnv({ path: resolve(process.cwd(), "../../.env"), override: false });
 
 async function main(): Promise<void> {
   const config = loadConfig();
