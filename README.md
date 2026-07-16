@@ -1,65 +1,65 @@
 # Aipany
 
-Aipany is a mobile-first realtime AI voice platform designed to grow into a reusable voice cloud for ESP32-S3 devices, smart speakers, toys, robots, and third-party hardware.
+Aipany 是一个以移动端为起点的实时 AI 语音平台，未来将扩展为可复用的 AI 语音云服务，为 ESP32-S3、智能音箱、AI 玩具、机器人以及第三方智能硬件提供统一接入能力。
 
-> Status: architecture bootstrap and V1 realtime voice foundation.
+> 当前阶段：完成平台架构初始化，进入 V1 实时语音能力开发。
 
-The first product milestone is a mobile voice companion with low-latency, interruptible, continuous conversation. The backend is intentionally device-agnostic so future embedded clients can reuse the same Agent, Memory, Tool, Device, and Usage infrastructure.
+第一阶段产品目标是在手机端实现低延迟、可自然打断、可连续交流的 AI 语音陪伴体验。后端从一开始就保持设备无关，使未来的嵌入式设备可以直接复用同一套 Agent、Memory、Tool、Device 和 Usage 基础设施。
 
-## Product direction
+## 产品方向
 
-- Realtime, interruptible speech-to-speech conversation
-- Mobile-first client with future ESP32 support
-- Agent personas and configurable voices
-- Long-term user memory
-- Tool calling, knowledge retrieval, and deep-task delegation
-- Multi-device session and capability model
-- Future multi-tenant hardware-vendor platform
+- 低延迟、可自然打断的实时语音对话
+- 先支持手机 App，后续无缝扩展 ESP32
+- 可配置的 Agent 人设与声音
+- 用户长期记忆
+- 工具调用、知识检索与复杂任务委派
+- 多设备统一会话与能力模型
+- 面向硬件厂商的多租户 AI 语音云平台
 
-## Architecture principle
+## 核心架构原则
 
-**The mobile app is a Device, not a special-case client.**
+**手机 App 也是一种 Device，而不是后端中的特殊客户端。**
 
-Every client joins the platform through a common Device + Session abstraction and reports its capabilities. Mobile, web, ESP32, smart speakers, and robots may use different media transports while sharing the same AI Brain and platform services.
+所有客户端都通过统一的 Device + Session 抽象接入平台，并上报自身能力。手机、Web、ESP32、智能音箱和机器人可以使用不同的音频传输方式，但共享同一个 AI Brain 和平台服务。
 
-## Repository structure
+## 仓库结构
 
 ```text
 apps/
-  mobile/             # first realtime voice client
-  admin-web/          # future management console
+  mobile/             # 第一款实时语音客户端
+  admin-web/          # 后续的平台管理后台
 
 clients/
-  esp32-sdk/          # reserved embedded client SDK boundary
+  esp32-sdk/          # 预留的嵌入式设备 SDK 边界
 
 firmware/
-  esp32/              # future ESP32-S3 reference firmware
+  esp32/              # 后续 ESP32-S3 参考固件
 
-services/             # backend domain boundaries
+services/             # 按业务领域划分的后端服务
 
 packages/
-  protocol/           # shared versioned device/session event contracts
+  protocol/           # 跨设备共享、带版本号的协议定义
 
 docs/
-  architecture/       # system design
-  roadmap/            # delivery plan
+  architecture/       # 系统架构设计
+  roadmap/            # 开发路线图
 ```
 
-## Current foundation
+## 当前基础能力
 
-The bootstrap branch introduces:
+基础分支已经建立：
 
-- pnpm + Turborepo monorepo configuration;
-- shared strict TypeScript configuration;
-- `@aipany/protocol` with device-agnostic session, speech, tool, and command events;
-- mobile and ESP32 architectural boundaries;
-- realtime voice / AI Brain system design;
-- a staged V1 delivery roadmap.
+- pnpm + Turborepo Monorepo 配置；
+- 统一的严格 TypeScript 配置；
+- `@aipany/protocol` 跨设备会话、语音、工具和设备命令协议；
+- 手机端与 ESP32 的统一架构边界；
+- 实时语音层与 AI Brain 的分层设计；
+- V1 分阶段开发路线图。
 
-## Start here
+## 从这里开始
 
-Read `docs/architecture/system-overview.md` for the platform design and `docs/roadmap/v1.md` for the implementation sequence.
+平台总体设计请阅读 `docs/architecture/system-overview.md`，实施顺序请阅读 `docs/roadmap/v1.md`。
 
-## Security
+## 安全要求
 
-Never embed permanent AI-provider credentials in mobile or embedded clients. Clients should receive short-lived session bootstrap credentials from Aipany's server. Real secrets belong only in server-side secret management and must never be committed to this repository.
+禁止在手机 App 或嵌入式设备中写入永久的 AI 服务商 API Key。客户端只能从 Aipany 服务端获取短期会话凭证。真实密钥必须存放在服务端的密钥管理环境中，并且绝不能提交到本仓库。
