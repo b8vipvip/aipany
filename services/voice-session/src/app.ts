@@ -1,4 +1,4 @@
-import Fastify, { type FastifyBaseLogger } from "fastify";
+import Fastify from "fastify";
 import { z } from "zod";
 
 import { VoiceSessionError } from "./errors.js";
@@ -36,7 +36,7 @@ const createSessionSchema = z.object({
 
 export interface BuildAppOptions {
   service: VoiceSessionService;
-  logger?: boolean | FastifyBaseLogger;
+  logger?: boolean;
 }
 
 export function buildApp(options: BuildAppOptions) {
