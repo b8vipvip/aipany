@@ -1,52 +1,52 @@
-# Aipany System Architecture
+# Aipany 系统架构
 
-## 1. Goal
+## 1. 目标
 
-Aipany is a device-agnostic realtime AI voice platform. The first client is a mobile application. Future clients may include ESP32-S3 boards, smart speakers, toys, robots, and other embedded devices without replacing the AI backend.
+Aipany 是一个与设备形态解耦的实时 AI 语音平台。第一款客户端是手机 App，未来可以继续接入 ESP32-S3、智能音箱、AI 玩具、机器人和其他嵌入式设备，而不需要替换 AI 后端。
 
-The platform must optimize for:
+平台重点优化以下能力：
 
-- low-latency full-duplex voice interaction;
-- immediate interruption and response cancellation;
-- provider abstraction for realtime voice models;
-- reusable agents, memory, tools, and knowledge across devices;
-- secure server-side control of credentials and business logic;
-- eventual multi-tenant support for hardware vendors.
+- 低延迟全双工实时语音交互；
+- 用户打断时立即停止和取消当前回复；
+- 对不同实时语音模型供应商进行统一抽象；
+- Agent、长期记忆、工具和知识库可跨设备复用；
+- API Key 和业务逻辑只由服务端安全控制；
+- 为未来硬件厂商多租户平台预留扩展能力。
 
-## 2. Core architecture
+## 2. 核心架构
 
 ```text
-Mobile App / Web / ESP32 / Robot
+手机 App / Web / ESP32 / 机器人
               |
-              | Device Session Protocol
+              | 统一设备会话协议
               v
-        API & Session Gateway
+          API 与会话网关
               |
        +------+-------+
        |              |
        v              v
-Realtime Voice     AI Brain
-Transport          Orchestrator
+ 实时语音层         AI Brain
+ Transport          Orchestrator
        |              |
-       |              +--> Agent configuration
-       |              +--> Long-term memory
-       |              +--> Knowledge / RAG
-       |              +--> Tools / MCP / APIs
-       |              +--> Deep-task models
-       |              +--> Safety / policy hooks
-       |              +--> Usage accounting
+       |              +--> Agent 人设与配置
+       |              +--> 长期记忆
+       |              +--> 知识库 / RAG
+       |              +--> Tools / MCP / 业务 API
+       |              +--> 深度任务模型
+       |              +--> 安全与策略控制
+       |              +--> 用量统计
        |
        v
-Realtime Voice Provider
+ 实时语音模型供应商
 ```
 
-The realtime provider is replaceable. Device clients do not directly own provider business credentials. The server creates or brokers short-lived session credentials and remains attached to the session through a control channel when supported.
+实时语音供应商必须是可替换的。设备端不持有供应商的长期业务密钥。服务端负责创建或代理短期会话凭证；供应商支持时，服务端还可以通过控制通道或 Sideband 连接保持对同一个实时会话的控制。
 
-## 3. Architectural rule: App is a Device
+## 3. 核心规则：App 也是一种 Device
 
-The backend must never assume that a realtime session belongs to a phone. Every client registers a `DeviceIdentity` with capabilities.
+后端不能假设实时会话一定来自手机。所有客户端都使用 `DeviceIdentity` 注册自身身份和能力。
 
-Examples:
+手机示例：
 
 ```json
 {
@@ -58,6 +58,8 @@ Examples:
 }
 ```
 
+ESP32 示例：
+
 ```json
 {
   "deviceId": "dev_esp32_456",
@@ -68,76 +70,76 @@ Examples:
 }
 ```
 
-Agents and tools inspect capabilities before attempting device actions.
+Agent 和工具在执行设备动作前，必须先检查设备是否具备对应能力。
 
-## 4. Realtime conversation path
+## 4. 实时对话主链路
 
 ```text
-1. Client authenticates with Aipany.
-2. Client registers or refreshes its device identity.
-3. Client requests a voice session.
-4. Voice Session Service selects provider, model policy, agent, and voice.
-5. Server returns short-lived session bootstrap data.
-6. Client establishes the realtime media connection.
-7. Server attaches its control/sideband connection when available.
-8. User audio streams continuously.
-9. Realtime model handles conversational timing and natural speech.
-10. Complex tasks are delegated to AI Brain tools or deeper models.
-11. Results return to the realtime model for natural spoken delivery.
-12. Session events and usage are persisted asynchronously.
+1. 客户端向 Aipany 完成身份认证。
+2. 客户端注册或刷新 DeviceIdentity。
+3. 客户端请求创建 Voice Session。
+4. Voice Session Service 选择实时语音供应商、模型策略、Agent 和声音。
+5. 服务端返回短期会话启动数据。
+6. 客户端建立实时音频连接。
+7. 供应商支持时，服务端建立控制通道 / Sideband 连接。
+8. 用户音频持续流式发送。
+9. 实时语音模型负责自然的对话节奏和语音响应。
+10. 复杂任务委派给 AI Brain 的工具或更强的推理模型。
+11. 任务结果返回实时语音层，由语音模型自然表达给用户。
+12. 会话事件和用量数据异步持久化。
 ```
 
-## 5. Interruption model
+## 5. 打断模型
 
-Barge-in is a first-class state transition, not a UI feature.
+Barge-in（用户打断）是平台级状态转换，而不是一个单纯的 UI 功能。
 
-When user speech starts while assistant audio is playing:
+当 AI 正在播放语音，而系统检测到用户开始讲话时：
 
 ```text
 user.speech.started
         |
-        +--> stop or duck local playback immediately
-        +--> cancel active assistant response
-        +--> truncate unheard assistant context when supported
-        +--> mark assistant.speech.interrupted
-        +--> continue receiving user speech
+        +--> 客户端立即停止或降低本地播放音量
+        +--> 取消当前正在生成的 AI 回复
+        +--> 供应商支持时截断用户未听到的 AI 上下文
+        +--> 标记 assistant.speech.interrupted
+        +--> 继续接收用户的新语音
 ```
 
-The mobile client should react locally before waiting for a server round-trip.
+手机端应优先执行本地停止播放，不应先等待一次服务端网络往返。
 
-## 6. Service boundaries
+## 6. 服务边界
 
 ### API Gateway
 
-Authentication, rate limits, request routing, product/device context.
+负责认证、限流、请求路由，以及 Tenant / Product / Device 上下文解析。
 
 ### Device Service
 
-Device registration, capabilities, product association, online status, future firmware and OTA metadata.
+负责设备注册、能力管理、产品关联、在线状态，以及未来固件和 OTA 元数据。
 
 ### Voice Session Service
 
-Realtime provider abstraction, short-lived credential creation, session lifecycle, transport metadata, interruption state, transcript events.
+负责实时语音供应商抽象、短期凭证创建、会话生命周期、传输元数据、打断状态和字幕事件。
 
 ### Agent Service
 
-Persona, system instructions, voice settings, reply style, initiative policy, memory policy, enabled tools.
+负责人设、系统指令、声音配置、回复风格、主动程度、记忆策略和可用工具。
 
 ### Memory Service
 
-User profile facts, preferences, relationships, projects, episodic memories, conversation summaries, retrieval and forgetting policy.
+负责用户资料、偏好、人物关系、项目、事件记忆、对话摘要、记忆检索和遗忘策略。
 
 ### Tool Service
 
-Tool registry and execution for web/search providers, knowledge retrieval, MCP, business APIs, and device commands.
+负责工具注册与执行，包括搜索、知识库、MCP、业务 API 和设备控制命令。
 
 ### Usage & Billing Service
 
-Session duration, provider usage, model usage, tenant/product attribution, quotas and future billing.
+负责会话时长、供应商用量、模型用量、Tenant / Product 归属、配额和未来计费。
 
-## 7. Data model direction
+## 7. 数据模型方向
 
-Initial primary entities:
+初始核心实体：
 
 - User
 - Tenant
@@ -152,13 +154,13 @@ Initial primary entities:
 - ToolExecution
 - UsageRecord
 
-`Tenant` can initially represent Aipany itself, allowing multi-tenant hardware vendors later without redesigning the schema.
+第一阶段可以让 `Tenant` 只代表 Aipany 自身，但数据库从一开始保留 Tenant 维度，这样未来支持多个硬件厂商时不需要重新设计核心数据模型。
 
-## 8. Provider abstraction
+## 8. 实时语音供应商抽象
 
-Do not expose provider-native event names throughout the product codebase. Normalize them into `@aipany/protocol` events.
+不要让供应商原生事件名称散落到整个业务代码中。所有事件应转换为 `@aipany/protocol` 定义的统一事件。
 
-Recommended interface:
+建议接口：
 
 ```text
 RealtimeProvider
@@ -171,16 +173,16 @@ RealtimeProvider
   closeSession()
 ```
 
-A provider adapter translates native events into the Aipany protocol.
+每个 Provider Adapter 只负责把供应商的接口和原生事件转换成 Aipany 平台协议。
 
-## 9. V1 non-goals
+## 9. V1 暂不实现
 
-The first release will not implement:
+第一版暂不实现：
 
-- ESP32 firmware;
-- hardware-vendor billing;
-- production OTA infrastructure;
-- a public SDK marketplace;
-- every realtime model provider.
+- ESP32 正式固件；
+- 硬件厂商正式计费；
+- 生产级 OTA 基础设施；
+- 公共 SDK 市场；
+- 所有实时语音模型供应商适配。
 
-The architecture preserves these paths while V1 concentrates on excellent mobile voice interaction.
+架构会保留这些扩展路径，但 V1 的第一目标是先把手机端的实时语音交互体验做到优秀。
