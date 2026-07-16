@@ -1,13 +1,13 @@
-# Admin Web Placeholder
+# 管理后台（预留）
 
-The admin application will eventually manage:
+后续管理后台主要用于管理：
 
-- agents and persona configuration;
-- voice policies;
-- users and devices;
-- products and future hardware-vendor tenants;
-- memory inspection and user-controlled deletion;
-- tool configuration;
-- usage, quotas, billing and operational diagnostics.
+- Agent 与人设配置；
+- 声音和对话策略；
+- 用户与设备；
+- Product 与未来的硬件厂商 Tenant；
+- 用户长期记忆的查看和主动删除；
+- Tool 配置；
+- 用量、配额、计费和运行诊断。
 
-It is not required for the first realtime voice vertical slice.
+第一阶段的实时语音最小闭环暂不依赖管理后台。
