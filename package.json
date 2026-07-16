@@ -1,0 +1,19 @@
+{
+  "name": "aipany",
+  "private": true,
+  "version": "0.0.0",
+  "packageManager": "pnpm@10.12.1",
+  "scripts": {
+    "build": "turbo build",
+    "dev": "turbo dev --parallel",
+    "lint": "turbo lint",
+    "test": "turbo test",
+    "typecheck": "turbo typecheck",
+    "format": "prettier --write ."
+  },
+  "devDependencies": {
+    "prettier": "^3.5.3",
+    "turbo": "^2.5.4",
+    "typescript": "^5.8.3"
+  }
+}
