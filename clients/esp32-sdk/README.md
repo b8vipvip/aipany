@@ -1,16 +1,16 @@
-# ESP32 SDK Placeholder
+# ESP32 SDK（预留）
 
-This directory reserves the future embedded client SDK boundary.
+该目录用于预留未来嵌入式设备客户端 SDK 的边界。
 
-The ESP32 client should implement the same platform concepts as the mobile client:
+ESP32 客户端需要与手机端共享相同的平台概念：
 
-- device registration and capability reporting;
-- authenticated session bootstrap;
-- realtime audio transport;
-- session and speech-state events from `@aipany/protocol`;
-- device command handling;
-- connectivity and firmware metadata.
+- 设备注册与 Capability 上报；
+- 带认证的 Session 启动流程；
+- 实时音频传输；
+- 复用 `@aipany/protocol` 的会话和语音状态事件；
+- 设备命令处理；
+- 网络状态与固件元数据。
 
-The first target is expected to be ESP32-S3-class hardware. The transport adapter may differ from mobile, but Agent, Memory, Tool, Device, and Usage contracts must remain shared.
+第一款目标硬件预计为 ESP32-S3 级别设备。嵌入式端的传输适配器可以与手机不同，但 Agent、Memory、Tool、Device 和 Usage 的平台协议必须保持统一。
 
-No embedded implementation is required for the mobile V1 milestone.
+手机 V1 阶段暂不要求实现嵌入式客户端。
