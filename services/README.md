@@ -1,15 +1,15 @@
-# Services
+# 后端服务
 
-Aipany backend services are organized by domain boundaries rather than by client platform.
+Aipany 后端按照业务领域划分，而不是按照客户端平台划分。
 
-Planned service modules:
+计划中的服务模块：
 
-- `api-gateway` — authentication, tenant/product/device context, rate limits, routing;
-- `voice-session` — realtime provider adapters, session lifecycle, interruption state;
-- `agent` — personas, system instructions, voice and conversation policies;
-- `memory` — long-term memory extraction, retrieval, editing, deletion and summaries;
-- `tools` — tool registry, execution, MCP, knowledge retrieval and business APIs;
-- `device` — registration, capabilities, online state and future OTA metadata;
-- `billing` — usage attribution, quotas and future tenant billing.
+- `api-gateway` —— 认证、Tenant / Product / Device 上下文、限流和路由；
+- `voice-session` —— 实时语音 Provider 适配、Session 生命周期和打断状态；
+- `agent` —— 人设、系统指令、声音和对话策略；
+- `memory` —— 长期记忆提取、检索、修改、删除和对话摘要；
+- `tools` —— Tool Registry、执行、MCP、知识检索和业务 API；
+- `device` —— 设备注册、Capability、在线状态和未来 OTA 元数据；
+- `billing` —— 用量归属、配额和未来的 Tenant 计费。
 
-V1 may initially deploy several of these modules inside one backend process. The code boundaries should still follow these domains so they can be split later without rewriting contracts.
+V1 初期可以把多个模块部署在同一个后端进程中，但代码边界仍然必须遵循这些领域划分，方便未来按需拆分，而不需要重写核心协议。
