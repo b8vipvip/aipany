@@ -1,16 +1,16 @@
-# ESP32 Firmware Placeholder
+# ESP32 参考固件（预留）
 
-Future reference firmware will live here.
+未来的 ESP32 参考固件将放在这里。
 
-Expected responsibilities:
+预计职责包括：
 
-- audio capture and playback;
-- AEC/noise processing where supported;
-- wake-word and local interaction hooks;
-- realtime transport adapter;
-- device identity and provisioning;
-- local interruption response;
-- capability reporting;
-- OTA integration.
+- 音频采集与播放；
+- 硬件支持时进行 AEC / 降噪处理；
+- 唤醒词和本地交互 Hook；
+- 实时音频传输适配；
+- Device Identity 与设备配网；
+- 用户打断时的本地快速响应；
+- Capability 上报；
+- OTA 集成。
 
-The firmware must consume platform contracts rather than duplicate server-side Agent or Memory logic.
+固件必须消费平台统一协议，不得复制服务端的 Agent 或 Memory 业务逻辑。
