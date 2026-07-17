@@ -30,11 +30,11 @@ jobs:
       - name: 安装依赖
         run: pnpm install --no-frozen-lockfile --reporter=silent
 
-      - name: TypeScript 类型检查
-        run: pnpm typecheck
-
       - name: 运行测试
         run: pnpm test
+
+      - name: TypeScript 类型检查
+        run: pnpm typecheck
 
       - name: Docker Build 校验
         run: |
