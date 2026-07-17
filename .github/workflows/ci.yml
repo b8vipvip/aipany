@@ -32,9 +32,9 @@ jobs:
 
       - name: Docker Build 校验
         run: |
-          docker build -f services/admin-api/Dockerfile .
-          docker build -f services/voice-session/Dockerfile .
-          docker build -f apps/admin-web/Dockerfile .
+          docker build --quiet -f services/admin-api/Dockerfile .
+          docker build --quiet -f services/voice-session/Dockerfile .
+          docker build --quiet -f apps/admin-web/Dockerfile .
 
       - name: 运行测试
         run: pnpm test
