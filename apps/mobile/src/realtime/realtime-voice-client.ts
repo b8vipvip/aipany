@@ -210,15 +210,16 @@ export class RealtimeVoiceClient {
   }
 
   private async exchangeSdp(session: VoiceSessionBootstrap, offerSdp: string): Promise<string> {
-    const formData = new FormData();
-    formData.append("sdp", offerSdp);
-
+    // 当前 Voice Session 服务签发的是 ephemeral client secret。
+    // 按 Realtime WebRTC 的短期凭证流程，客户端直接以 application/sdp
+    // 将 Offer POST 到 /v1/realtime/calls，而不是使用服务端 unified interface 的 multipart 格式。
     const response = await fetch(session.bootstrap.endpoint, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${session.bootstrap.clientSecret}`,
+        "Content-Type": "application/sdp",
       },
-      body: formData,
+      body: offerSdp,
     });
 
     if (!response.ok) {
