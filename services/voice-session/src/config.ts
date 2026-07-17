@@ -2,6 +2,8 @@ import { z } from "zod";
 
 const envSchema = z.object({
   AI_REALTIME_API_KEY: z.string().min(1, "缺少 AI_REALTIME_API_KEY"),
+  DATABASE_URL: z.string().optional(),
+  AIPANY_CONFIG_ENCRYPTION_KEY: z.string().optional(),
   OPENAI_REALTIME_MODEL: z.string().min(1).default("gpt-realtime-2.1"),
   OPENAI_REALTIME_VOICE: z.string().min(1).default("marin"),
   OPENAI_REALTIME_BASE_URL: z.string().url().default("https://api.openai.com/v1"),
@@ -16,6 +18,8 @@ export interface VoiceSessionConfig {
   baseUrl: string;
   host: string;
   port: number;
+  databaseUrl?: string;
+  encryptionKey?: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): VoiceSessionConfig {
@@ -33,5 +37,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): VoiceSessionCo
     baseUrl: parsed.data.OPENAI_REALTIME_BASE_URL.replace(/\/$/, ""),
     host: parsed.data.VOICE_SESSION_HOST,
     port: parsed.data.VOICE_SESSION_PORT,
+    databaseUrl: parsed.data.DATABASE_URL,
+    encryptionKey: parsed.data.AIPANY_CONFIG_ENCRYPTION_KEY,
   };
 }

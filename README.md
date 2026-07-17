@@ -74,6 +74,19 @@ Android 编译不要求本地 Windows 开发环境。iOS 原生应用仍需要 m
 
 平台总体设计请阅读 `docs/architecture/system-overview.md`，实施顺序请阅读 `docs/roadmap/v1.md`。
 
+## Provider 配置后台与 Ubuntu 部署
+
+本阶段新增 `services/admin-api`、`apps/admin-web`、`packages/provider-types` 与 `deploy/ubuntu`。管理后台用于统一配置 Realtime、Text、ASR、TTS Provider；永久 API Key 只保存在服务端数据库，并使用 AES-256-GCM 加密。手机 App 和未来 ESP32 仍只调用 Aipany 统一接口。
+
+Ubuntu 单机部署示例：
+
+```bash
+cp deploy/ubuntu/.env.example deploy/ubuntu/.env
+docker compose -f deploy/ubuntu/docker-compose.yml up -d --build
+```
+
+生产环境部署前必须启用 `ADMIN_API_TOKEN`，并继续接入正式 Admin Authentication。更多说明见 `docs/architecture/provider-config.md` 与 `docs/architecture/deployment.md`。
+
 ## 安全要求
 
 禁止在手机 App 或嵌入式设备中写入永久的 AI 服务商 API Key。客户端只能从 Aipany 服务端获取短期会话凭证。真实密钥必须存放在服务端的密钥管理环境中，并且绝不能提交到本仓库。

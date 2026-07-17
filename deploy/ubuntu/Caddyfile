@@ -1,0 +1,20 @@
+:80 {
+  encode zstd gzip
+
+  handle /api/admin* {
+    uri strip_prefix /api/admin
+    reverse_proxy admin-api:3100
+  }
+
+  handle /api/voice* {
+    uri strip_prefix /api/voice
+    reverse_proxy voice-session:3000
+  }
+
+  handle /admin* {
+    uri strip_prefix /admin
+    reverse_proxy admin-web:80
+  }
+
+  redir / /admin/ 302
+}

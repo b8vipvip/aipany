@@ -17,24 +17,33 @@ jobs:
 
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        shell: bash
+        run: |
+          git -c init.defaultBranch=main init -q .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --quiet --depth=1 origin "${GITHUB_SHA}"
+          git checkout --quiet --detach FETCH_HEAD
 
       - name: 安装 pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10.12.1
-          run_install: false
-
-      - name: 安装 Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
+        run: npm install --global pnpm@10.12.1 --silent
 
       - name: 安装依赖
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --no-frozen-lockfile --reporter=silent
 
-      - name: TypeScript 类型检查
-        run: pnpm typecheck
+      - name: Docker Build 校验
+        shell: bash
+        run: |
+          set -o pipefail
+          docker build --quiet -f services/admin-api/Dockerfile .
+          docker build --quiet -f services/voice-session/Dockerfile .
+          if ! docker build --progress=plain -f apps/admin-web/Dockerfile . > /tmp/admin-web-docker.log 2>&1; then
+            tail -n 30 /tmp/admin-web-docker.log
+            exit 1
+          fi
+          tail -n 10 /tmp/admin-web-docker.log
 
       - name: 运行测试
         run: pnpm test
+
+      - name: TypeScript 类型检查
+        run: pnpm typecheck
