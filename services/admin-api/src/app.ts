@@ -30,11 +30,12 @@ export function buildApp(
   registerProviderRoutes(app, providers);
 
   app.setErrorHandler((error, request, reply) => {
-    request.log.warn({ message: error.message }, "Admin API 请求失败");
+    const message = error instanceof Error ? error.message : "Admin API 请求处理失败";
+    request.log.warn({ message }, "Admin API 请求失败");
     return reply.code(400).send({
       error: {
         code: "BAD_REQUEST",
-        message: error.message,
+        message,
       },
     });
   });
