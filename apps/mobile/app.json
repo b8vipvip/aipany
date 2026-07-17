@@ -5,6 +5,15 @@
     "version": "0.1.0",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
+    "plugins": [
+      [
+        "expo-dev-client",
+        {
+          "launchMode": "most-recent"
+        }
+      ],
+      "@config-plugins/react-native-webrtc"
+    ],
     "ios": {
       "supportsTablet": true,
       "infoPlist": {
@@ -12,7 +21,7 @@
       }
     },
     "android": {
-      "permissions": ["RECORD_AUDIO"],
+      "permissions": ["RECORD_AUDIO", "MODIFY_AUDIO_SETTINGS"],
       "package": "com.aipany.mobile"
     },
     "extra": {
