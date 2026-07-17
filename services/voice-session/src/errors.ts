@@ -3,6 +3,7 @@ export type VoiceSessionErrorCode =
   | "MISSING_DEVICE_CAPABILITY"
   | "PROVIDER_UNAVAILABLE"
   | "PROVIDER_REJECTED"
+  | "UNSUPPORTED_PROVIDER_PROTOCOL"
   | "CONFIGURATION_ERROR";
 
 export class VoiceSessionError extends Error {
