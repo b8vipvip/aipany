@@ -1,0 +1,73 @@
+name: Android APK 云端编译
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-android:
+    name: 编译 Android Release APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CI: "1"
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.12.1
+          run_install: false
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 安装 Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: 配置 Gradle 缓存
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: 安装 JavaScript 依赖
+        run: pnpm install --no-frozen-lockfile
+
+      - name: 配置 App 后端地址
+        shell: bash
+        env:
+          CONFIGURED_API_BASE_URL: ${{ vars.AIPANY_API_BASE_URL }}
+        run: |
+          if [ -n "$CONFIGURED_API_BASE_URL" ]; then
+            echo "EXPO_PUBLIC_API_BASE_URL=$CONFIGURED_API_BASE_URL" >> "$GITHUB_ENV"
+          else
+            echo "EXPO_PUBLIC_API_BASE_URL=http://10.0.2.2:3000" >> "$GITHUB_ENV"
+            echo "未配置仓库变量 AIPANY_API_BASE_URL，本次 APK 使用 Android 模拟器默认地址。"
+          fi
+
+      - name: 生成 Android 原生工程
+        run: pnpm --filter @aipany/mobile exec expo prebuild --platform android --clean
+
+      - name: 编译 Release APK
+        working-directory: apps/mobile/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: 上传 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: aipany-android-release
+          path: apps/mobile/android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 14
