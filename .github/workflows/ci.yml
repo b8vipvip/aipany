@@ -37,10 +37,10 @@ jobs:
           docker build --quiet -f services/admin-api/Dockerfile .
           docker build --quiet -f services/voice-session/Dockerfile .
           if ! docker build --progress=plain -f apps/admin-web/Dockerfile . > /tmp/admin-web-docker.log 2>&1; then
-            tail -n 100 /tmp/admin-web-docker.log
+            tail -n 30 /tmp/admin-web-docker.log
             exit 1
           fi
-          tail -n 20 /tmp/admin-web-docker.log
+          tail -n 10 /tmp/admin-web-docker.log
 
       - name: 运行测试
         run: pnpm test
