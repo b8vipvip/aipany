@@ -1,0 +1,7 @@
+:80 {
+  encode zstd gzip
+  handle_path /api/admin/* { reverse_proxy admin-api:3100 }
+  handle_path /api/voice/* { reverse_proxy voice-session:3000 }
+  handle_path /admin/* { reverse_proxy admin-web:80 }
+  redir / /admin/ 302
+}

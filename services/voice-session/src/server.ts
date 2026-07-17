@@ -4,7 +4,7 @@ import { config as loadDotEnv } from "dotenv";
 
 import { buildApp } from "./app.js";
 import { loadConfig } from "./config.js";
-import { OpenAIRealtimeProvider } from "./providers/openai-realtime-provider.js";
+import { ProviderRegistry } from "./provider-registry.js";
 import { VoiceSessionService } from "./service.js";
 
 // pnpm / Turborepo 通常会在当前 package 目录执行脚本，因此同时尝试当前目录和仓库根目录。
@@ -14,15 +14,19 @@ loadDotEnv({ path: resolve(process.cwd(), "../../.env"), override: false });
 async function main(): Promise<void> {
   const config = loadConfig();
 
-  const provider = new OpenAIRealtimeProvider({
-    apiKey: config.apiKey,
-    baseUrl: config.baseUrl,
-    model: config.model,
-    voice: config.voice,
-    eagerness: "low",
+  const registry = new ProviderRegistry({
+    databaseUrl: config.databaseUrl,
+    encryptionKey: config.encryptionKey,
+    fallback: {
+      apiKey: config.apiKey,
+      baseUrl: config.baseUrl,
+      model: config.model,
+      voice: config.voice,
+      eagerness: "low",
+    },
   });
 
-  const service = new VoiceSessionService(provider);
+  const service = new VoiceSessionService(await registry.getRealtimeProvider());
   const app = buildApp({ service, logger: true });
 
   await app.listen({

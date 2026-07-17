@@ -1,0 +1,10 @@
+import pg from "pg";
+import { OpenAIRealtimeProvider } from "./providers/openai-realtime-provider.js";
+import type { RealtimeProvider } from "./types.js";
+import { VoiceSessionError } from "./errors.js";
+import { createDecipheriv, createHash } from "node:crypto";
+export interface RegistryConfig{databaseUrl?:string;encryptionKey?:string;fallback:ConstructorParameters<typeof OpenAIRealtimeProvider>[0]}
+interface Row{id:string;protocol:string;base_url:string;model:string;voice:string|null;api_key_ciphertext:string;api_key_iv:string;api_key_auth_tag:string;settings:Record<string,unknown>}
+function keyBytes(k:string){const b=Buffer.from(k,"base64");return b.length===32?b:Buffer.byteLength(k)===32?Buffer.from(k):createHash("sha256").update(k).digest()}
+function decrypt(k:string,r:Row){const d=createDecipheriv("aes-256-gcm",keyBytes(k),Buffer.from(r.api_key_iv,"base64"));d.setAuthTag(Buffer.from(r.api_key_auth_tag,"base64"));return Buffer.concat([d.update(Buffer.from(r.api_key_ciphertext,"base64")),d.final()]).toString("utf8")}
+export class ProviderRegistry{constructor(private cfg:RegistryConfig){} async getRealtimeProvider():Promise<RealtimeProvider>{if(this.cfg.databaseUrl&&this.cfg.encryptionKey){const pool=new pg.Pool({connectionString:this.cfg.databaseUrl});try{const policy=(await pool.query("SELECT value FROM system_settings WHERE key='provider_policy'")).rows[0]?.value as {realtimeProviderId?:string}|undefined; if(policy?.realtimeProviderId){const row=(await pool.query("SELECT * FROM provider_configs WHERE id=$1 AND enabled=true",[policy.realtimeProviderId])).rows[0] as Row|undefined; if(row){if(row.protocol!=="openai"&&row.protocol!=="openai-compatible")throw new VoiceSessionError("UNSUPPORTED_PROVIDER_PROTOCOL","默认 Realtime Provider 的协议暂不支持",422,{protocol:row.protocol});return new OpenAIRealtimeProvider({apiKey:decrypt(this.cfg.encryptionKey,row),baseUrl:row.base_url.replace(/\/$/,""),model:row.model,voice:row.voice??"marin"});}}}finally{await pool.end();}}return new OpenAIRealtimeProvider(this.cfg.fallback);}}

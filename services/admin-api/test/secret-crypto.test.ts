@@ -1,0 +1,2 @@
+import { describe, expect, it } from "vitest";import { SecretCrypto, maskSecret } from "../src/security/secret-crypto.js";
+describe("SecretCrypto",()=>{it("加密后可解密且不会保存明文",()=>{const c=new SecretCrypto("12345678901234567890123456789012");const e=c.encrypt("sk-testabcd");expect(e.ciphertext).not.toContain("sk-testabcd");expect(c.decrypt(e)).toBe("sk-testabcd")});it("只返回掩码",()=>{expect(maskSecret("sk-abcdef1234")).toBe("sk-****1234")})});
