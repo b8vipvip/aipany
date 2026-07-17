@@ -210,13 +210,15 @@ export class RealtimeVoiceClient {
   }
 
   private async exchangeSdp(session: VoiceSessionBootstrap, offerSdp: string): Promise<string> {
+    const formData = new FormData();
+    formData.append("sdp", offerSdp);
+
     const response = await fetch(session.bootstrap.endpoint, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${session.bootstrap.clientSecret}`,
-        "Content-Type": "application/sdp",
       },
-      body: offerSdp,
+      body: formData,
     });
 
     if (!response.ok) {
