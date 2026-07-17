@@ -31,10 +31,16 @@ jobs:
         run: pnpm install --no-frozen-lockfile --reporter=silent
 
       - name: Docker Build 校验
+        shell: bash
         run: |
+          set -o pipefail
           docker build --quiet -f services/admin-api/Dockerfile .
           docker build --quiet -f services/voice-session/Dockerfile .
-          docker build --quiet -f apps/admin-web/Dockerfile .
+          if ! docker build --progress=plain -f apps/admin-web/Dockerfile . > /tmp/admin-web-docker.log 2>&1; then
+            tail -n 100 /tmp/admin-web-docker.log
+            exit 1
+          fi
+          tail -n 20 /tmp/admin-web-docker.log
 
       - name: 运行测试
         run: pnpm test
