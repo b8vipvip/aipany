@@ -8,7 +8,7 @@ RUN pnpm install --filter @aipany/admin-api... --prod=false
 FROM deps AS build
 COPY packages/provider-types packages/provider-types
 COPY services/admin-api services/admin-api
-RUN pnpm --filter @aipany/admin-api build
+RUN pnpm --filter @aipany/admin-api... build
 FROM node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production

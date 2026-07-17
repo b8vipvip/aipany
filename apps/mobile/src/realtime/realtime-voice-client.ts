@@ -20,6 +20,10 @@ export interface RealtimeVoiceEvent {
   [key: string]: unknown;
 }
 
+interface DataChannelMessage {
+  data?: unknown;
+}
+
 export interface RealtimeVoiceClientHandlers {
   onStateChange?: (state: RealtimeVoiceConnectionState) => void;
   onEvent?: (event: RealtimeVoiceEvent) => void;
@@ -164,7 +168,7 @@ export class RealtimeVoiceClient {
   }
 
   private bindPeerConnectionEvents(peerConnection: RTCPeerConnection): void {
-    peerConnection.addEventListener("connectionstatechange", () => {
+    peerConnection.onconnectionstatechange = () => {
       const state = peerConnection.connectionState;
 
       if (state === "connected") {
@@ -182,19 +186,19 @@ export class RealtimeVoiceClient {
       if (state === "closed") {
         this.setState("closed");
       }
-    });
+    };
 
-    peerConnection.addEventListener("iceconnectionstatechange", () => {
+    peerConnection.oniceconnectionstatechange = () => {
       if (peerConnection.iceConnectionState === "failed") {
         this.handlers.onError?.(new Error("WebRTC ICE 连接失败"));
       }
-    });
+    };
   }
 
   private bindDataChannelEvents(
     dataChannel: ReturnType<RTCPeerConnection["createDataChannel"]>,
   ): void {
-    dataChannel.addEventListener("message", (message) => {
+    dataChannel.onmessage = (message: DataChannelMessage) => {
       if (typeof message.data !== "string") return;
 
       try {
@@ -206,7 +210,7 @@ export class RealtimeVoiceClient {
           raw: message.data,
         });
       }
-    });
+    };
   }
 
   private async exchangeSdp(session: VoiceSessionBootstrap, offerSdp: string): Promise<string> {
@@ -247,7 +251,7 @@ export class RealtimeVoiceClient {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
-        peerConnection.removeEventListener("icegatheringstatechange", handleStateChange);
+        peerConnection.onicegatheringstatechange = null;
         resolve();
       };
 
@@ -259,7 +263,7 @@ export class RealtimeVoiceClient {
 
       // 移动网络环境下 ICE Gathering 可能不会及时进入 complete，避免无限等待。
       const timeout = setTimeout(finish, 2_500);
-      peerConnection.addEventListener("icegatheringstatechange", handleStateChange);
+      peerConnection.onicegatheringstatechange = handleStateChange;
     });
   }
 

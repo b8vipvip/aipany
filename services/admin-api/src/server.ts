@@ -1,2 +1,24 @@
-import "dotenv/config";import { loadConfig } from "./config.js";import { createPool } from "./db/client.js";import { runMigrations } from "./db/migrate.js";import { SecretCrypto } from "./security/secret-crypto.js";import { ProviderConfigRepository } from "./modules/providers/provider-config.repository.js";import { ProviderConfigService } from "./modules/providers/provider-config.service.js";import { buildApp } from "./app.js";
-const c=loadConfig();const db=createPool(c.DATABASE_URL);await runMigrations(db);const service=new ProviderConfigService(new ProviderConfigRepository(db),new SecretCrypto(c.AIPANY_CONFIG_ENCRYPTION_KEY));await buildApp(c,service).listen({host:c.ADMIN_API_HOST,port:c.ADMIN_API_PORT});
+import "dotenv/config";
+
+import { buildApp } from "./app.js";
+import { loadConfig } from "./config.js";
+import { createPool } from "./db/client.js";
+import { runMigrations } from "./db/migrate.js";
+import { ProviderConfigRepository } from "./modules/providers/provider-config.repository.js";
+import { ProviderConfigService } from "./modules/providers/provider-config.service.js";
+import { SecretCrypto } from "./security/secret-crypto.js";
+
+const config = loadConfig();
+const db = createPool(config.DATABASE_URL);
+
+await runMigrations(db);
+
+const providers = new ProviderConfigService(
+  new ProviderConfigRepository(db),
+  new SecretCrypto(config.AIPANY_CONFIG_ENCRYPTION_KEY),
+);
+
+await buildApp(config, providers).listen({
+  host: config.ADMIN_API_HOST,
+  port: config.ADMIN_API_PORT,
+});
