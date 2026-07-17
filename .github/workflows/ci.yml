@@ -17,21 +17,23 @@ jobs:
 
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
-
-      - name: 安装 pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10.12.1
-          run_install: false
+        shell: bash
+        run: |
+          git init .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --depth=1 origin "${GITHUB_SHA}"
+          git checkout --detach FETCH_HEAD
 
       - name: 安装 Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
+      - name: 安装 pnpm
+        run: npm install --global pnpm@10.12.1 --silent
+
       - name: 安装依赖
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --no-frozen-lockfile --reporter=silent
 
       - name: TypeScript 类型检查
         run: pnpm typecheck
