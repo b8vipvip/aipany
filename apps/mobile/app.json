@@ -1,0 +1,22 @@
+{
+  "expo": {
+    "name": "Aipany",
+    "slug": "aipany",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "Aipany 需要使用麦克风与 AI 进行实时语音对话。"
+      }
+    },
+    "android": {
+      "permissions": ["RECORD_AUDIO"],
+      "package": "com.aipany.mobile"
+    },
+    "extra": {
+      "apiBaseUrl": "http://localhost:3000"
+    }
+  }
+}
