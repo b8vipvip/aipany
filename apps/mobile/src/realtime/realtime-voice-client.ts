@@ -24,6 +24,20 @@ interface DataChannelMessage {
   data?: unknown;
 }
 
+/**
+ * react-native-webrtc 运行时对象继承自 EventTarget，并支持标准事件监听方法；
+ * 但部分版本发布的 TypeScript 声明没有完整暴露这些继承成员。
+ * 这里仅在 WebRTC 边界做最小类型适配，避免把第三方声明缺陷扩散到业务代码。
+ */
+interface WebRtcEventTargetLike {
+  addEventListener(type: string, listener: (event: unknown) => void): void;
+  removeEventListener(type: string, listener: (event: unknown) => void): void;
+}
+
+function asEventTarget(target: unknown): WebRtcEventTargetLike {
+  return target as WebRtcEventTargetLike;
+}
+
 export interface RealtimeVoiceClientHandlers {
   onStateChange?: (state: RealtimeVoiceConnectionState) => void;
   onEvent?: (event: RealtimeVoiceEvent) => void;
@@ -74,7 +88,6 @@ export class RealtimeVoiceClient {
 
       const peerConnection = new RTCPeerConnection({});
       this.peerConnection = peerConnection;
-
       this.bindPeerConnectionEvents(peerConnection);
 
       for (const track of this.localStream.getAudioTracks()) {
@@ -168,7 +181,9 @@ export class RealtimeVoiceClient {
   }
 
   private bindPeerConnectionEvents(peerConnection: RTCPeerConnection): void {
-    peerConnection.onconnectionstatechange = () => {
+    const eventTarget = asEventTarget(peerConnection);
+
+    eventTarget.addEventListener("connectionstatechange", () => {
       const state = peerConnection.connectionState;
 
       if (state === "connected") {
@@ -186,19 +201,20 @@ export class RealtimeVoiceClient {
       if (state === "closed") {
         this.setState("closed");
       }
-    };
+    });
 
-    peerConnection.oniceconnectionstatechange = () => {
+    eventTarget.addEventListener("iceconnectionstatechange", () => {
       if (peerConnection.iceConnectionState === "failed") {
         this.handlers.onError?.(new Error("WebRTC ICE 连接失败"));
       }
-    };
+    });
   }
 
   private bindDataChannelEvents(
     dataChannel: ReturnType<RTCPeerConnection["createDataChannel"]>,
   ): void {
-    dataChannel.onmessage = (message: DataChannelMessage) => {
+    asEventTarget(dataChannel).addEventListener("message", (rawMessage) => {
+      const message = rawMessage as DataChannelMessage;
       if (typeof message.data !== "string") return;
 
       try {
@@ -210,7 +226,7 @@ export class RealtimeVoiceClient {
           raw: message.data,
         });
       }
-    };
+    });
   }
 
   private async exchangeSdp(session: VoiceSessionBootstrap, offerSdp: string): Promise<string> {
@@ -245,15 +261,8 @@ export class RealtimeVoiceClient {
     if (peerConnection.iceGatheringState === "complete") return;
 
     await new Promise<void>((resolve) => {
+      const eventTarget = asEventTarget(peerConnection);
       let settled = false;
-
-      const finish = () => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeout);
-        peerConnection.onicegatheringstatechange = null;
-        resolve();
-      };
 
       const handleStateChange = () => {
         if (peerConnection.iceGatheringState === "complete") {
@@ -261,9 +270,17 @@ export class RealtimeVoiceClient {
         }
       };
 
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        eventTarget.removeEventListener("icegatheringstatechange", handleStateChange);
+        resolve();
+      };
+
       // 移动网络环境下 ICE Gathering 可能不会及时进入 complete，避免无限等待。
       const timeout = setTimeout(finish, 2_500);
-      peerConnection.onicegatheringstatechange = handleStateChange;
+      eventTarget.addEventListener("icegatheringstatechange", handleStateChange);
     });
   }
 
