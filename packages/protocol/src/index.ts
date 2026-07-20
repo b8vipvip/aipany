@@ -59,13 +59,31 @@ export type UserEmotion =
   | "fearful"
   | "unknown";
 
+export interface SpeakerAttribution {
+  sessionSpeakerId: string;
+  personId?: string;
+  personName?: string;
+  isOwner: boolean;
+  confident: boolean;
+  similarity: number;
+  observationConfidence: number;
+}
+
 export type ServerEvent =
   | { type: "session.created"; sessionId: string; inputAudio: AudioFormat; outputAudio: AudioFormat }
   | { type: "session.ready"; sessionId: string }
   | { type: "input_audio_buffer.speech_started" }
   | { type: "input_audio_buffer.speech_stopped" }
   | { type: "transcript.partial"; text: string; emotion: UserEmotion; language?: string }
-  | { type: "transcript.final"; text: string; emotion: UserEmotion; language?: string }
+  | { type: "transcript.final"; text: string; emotion: UserEmotion; language?: string; speaker?: SpeakerAttribution }
+  | { type: "speaker.identified"; speaker: SpeakerAttribution }
+  | {
+      type: "speaker.filtered";
+      sessionSpeakerId: string;
+      personId?: string;
+      personName?: string;
+      reason: "owner_focus_non_owner";
+    }
   | { type: "mode.changed"; configuredMode: InteractionMode; activeMode: "owner_focus" | "group"; source: string }
   | {
       type: "mode.suggestion";
