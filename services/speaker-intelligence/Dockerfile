@@ -7,7 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HF_HOME=/models/huggingface
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libsndfile1 \
+    && apt-get install -y --no-install-recommends libsndfile1 libgomp1 ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 COPY services/speaker-intelligence/requirements.txt ./requirements.txt
