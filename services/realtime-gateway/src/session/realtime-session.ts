@@ -12,6 +12,7 @@ import {
 import {
   AudioIntelligenceEngine,
   HttpSpeakerIntelligenceProvider,
+  type SpeakerIdentityStore,
   type SpeakerObservation,
 } from "@aipany/audio-intelligence";
 import type { AppConfig } from "../config.js";
@@ -52,6 +53,7 @@ export class RealtimeSession {
   constructor(
     private readonly client: WebSocket,
     private readonly config: AppConfig,
+    private readonly identityStore: SpeakerIdentityStore,
   ) {
     this.llm = new OpenAiCompatibleLlm(config.llm);
   }
@@ -61,6 +63,11 @@ export class RealtimeSession {
     this.started = true;
     this.socialProactivity = event.session.socialProactivity;
     this.audioIntelligence = new AudioIntelligenceEngine({
+      identityStore: this.identityStore,
+      identityScope: {
+        tenantId: event.session.tenantId,
+        userId: event.session.userId,
+      },
       mode: {
         initialMode: event.session.interactionMode,
         initialActiveMode: event.session.interactionMode === "group" ? "group" : "owner_focus",
@@ -167,10 +174,10 @@ export class RealtimeSession {
     manager.dismissSuggestion(suggestionId);
   }
 
-  startSpeakerEnrollment(input: { personName: string; relation?: string; isOwner?: boolean }): void {
+  async startSpeakerEnrollment(input: { personName: string; relation?: string; isOwner?: boolean }): Promise<void> {
     const engine = this.audioIntelligence;
     if (!engine) return;
-    const enrollment = engine.enrollments.begin({
+    const enrollment = await engine.enrollments.begin({
       sessionId: this.id,
       personName: input.personName,
       relation: input.relation,
@@ -192,15 +199,32 @@ export class RealtimeSession {
     this.send({ type: "speaker.enrollment.cancelled", enrollmentId });
   }
 
+  async deleteSpeakerIdentity(personId: string): Promise<void> {
+    const engine = this.audioIntelligence;
+    if (!engine) throw new Error("会话尚未启动");
+
+    if (this.activeEnrollmentId) {
+      const enrollment = engine.enrollments.get(this.activeEnrollmentId);
+      if (enrollment?.personId === personId) {
+        engine.enrollments.cancel(this.activeEnrollmentId);
+        this.activeEnrollmentId = undefined;
+      }
+    }
+
+    const deleted = await engine.identities.deletePerson(engine.identityScope, personId);
+    if (!deleted) throw new Error("人物不存在或无权删除");
+    this.send({ type: "speaker.identity.deleted", personId });
+  }
+
   /**
    * Speaker Provider 的统一业务入口。
    * 它同时驱动长期身份匹配、渐进式声纹学习、自动模式建议以及客户端说话人事件。
    */
-  observeSpeaker(observation: SpeakerObservation): SpeakerAttribution | undefined {
+  async observeSpeaker(observation: SpeakerObservation): Promise<SpeakerAttribution | undefined> {
     const engine = this.audioIntelligence;
     if (!engine) return undefined;
 
-    const { match, suggestion } = engine.observeSpeaker(observation);
+    const { match, suggestion } = await engine.observeSpeaker(observation);
     if (suggestion) {
       this.send({
         type: "mode.suggestion",
@@ -216,7 +240,7 @@ export class RealtimeSession {
     let enrollmentPersonName: string | undefined;
     let enrollmentConfirmed = false;
     if (this.activeEnrollmentId) {
-      const result = engine.enrollments.ingest(this.activeEnrollmentId, observation);
+      const result = await engine.enrollments.ingest(this.activeEnrollmentId, observation);
       enrollmentPersonId = result.state.personId;
       enrollmentPersonName = result.state.personName;
       enrollmentConfirmed = result.state.status === "confirmed";
@@ -229,7 +253,9 @@ export class RealtimeSession {
       if (result.state.status === "confirmed") this.activeEnrollmentId = undefined;
     }
 
-    const enrolledPerson = enrollmentPersonId ? engine.identities.getPerson(enrollmentPersonId) : undefined;
+    const enrolledPerson = enrollmentPersonId
+      ? await engine.identities.getPerson(engine.identityScope, enrollmentPersonId)
+      : undefined;
     const attribution: SpeakerAttribution = {
       sessionSpeakerId: observation.sessionSpeakerId,
       personId: match?.person?.id ?? enrollmentPersonId,
@@ -260,11 +286,11 @@ export class RealtimeSession {
     if (!analysis) return;
 
     const processed = analysis
-      .then((observation): SpeakerAnalysisOutcome | undefined => {
+      .then(async (observation): Promise<SpeakerAnalysisOutcome | undefined> => {
         if (!observation || this.closed) return undefined;
         return {
           observation,
-          attribution: this.observeSpeaker(observation),
+          attribution: await this.observeSpeaker(observation),
         };
       })
       .catch((error) => {
