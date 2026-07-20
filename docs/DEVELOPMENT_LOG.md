@@ -2,319 +2,389 @@
 
 > 本文档用于记录每次新增的重要业务逻辑、框架、协议和架构决策。后续功能开发必须同步更新本文件，避免只改代码不留下设计上下文。
 
-## 2026-07-20 · v0.2.2 Encrypted Speaker Identity Persistence
+## 2026-07-20 · v0.3 Complete Social Voice Architecture
 
 ### 本次目标
 
-解决 v0.2.1 的核心限制：人物声纹只存在于单个 `RealtimeSession` 的内存中，无法跨会话共享，更无法在 Gateway 重启后保留。
-
-本次把身份链路升级为：
+完成 v0.2.x 架构中尚未落地的核心能力，使 Aipany 从“单轮声纹增强的实时语音链路”升级为可实际运行的完整 Social Voice Architecture：
 
 ```text
-Realtime Session
-↓
-AudioIntelligenceEngine（会话级 Mode / Social 状态）
-↓
-共享 SpeakerIdentityStore
-├─ InMemorySpeakerIdentityStore
-└─ PostgresSpeakerIdentityStore
-   ↓
-PostgreSQL + pgvector
+Raw / Multi-channel PCM
+        │
+        ├─────────────── 原始分析支路 ───────────────────────┐
+        │                                                    │
+        ▼                                                    ▼
+Audio Front-End                                      Audio Intelligence Service
+Beamforming                                          ├─ Speaker Embedding
+AEC                                                  ├─ Online Diarization
+Noise Suppression                                    ├─ Overlap Detection
+AGC                                                  ├─ Speech Separation
+Dereverb                                             ├─ Target Speaker Extraction
+        │                                            ├─ Segment Transcription
+        ▼                                            └─ Environment Intelligence
+Qwen Realtime ASR                                             │
+        │                                                     │
+        └──────────────────────┬──────────────────────────────┘
+                               ▼
+                      Identity + Mode Manager
+                               ▼
+                    Social Conversation Manager
+                  respond / stay_silent / intervene
+                               ▼
+                      Conversation Brain (LLM)
+                               ▼
+                        Emotion Director
+                               ▼
+                      Expressive Realtime TTS
 ```
 
-### 修正身份 Store 生命周期
+### 1. 轮次内在线 Speaker Diarization
 
-v0.2.1 在每个 `RealtimeSession.start()` 中创建新的 `AudioIntelligenceEngine`，而 Engine 内部又创建独立的 `InMemorySpeakerIdentityStore`。
+`services/speaker-intelligence/app/audio_engine.py` 新增基于 ECAPA embedding 的在线说话人分段：
 
-这意味着即使服务器不重启，人物声纹也无法自然跨 WebSocket 会话复用。
+1. 从 VAD 轮次中检测有效语音区域；
+2. 使用滑动时间窗提取 Speaker Embedding；
+3. 在线聚类为 `speaker_1 / speaker_2 / ...`；
+4. Gateway 再通过 `SessionSpeakerTracker` 将轮次内标签映射到跨轮次稳定 Session Speaker ID；
+5. 每个分段可以携带自己的 embedding 和 transcript。
 
-v0.2.2 改为：
+这使多人模式不再只能给“一整个 VAD 轮次”分配一个说话人。
 
-- Gateway 启动时创建一个共享 `SpeakerIdentityStore`；
-- 每个实时会话继续拥有独立 `ModeManager`、`SocialConversationManager` 和 Enrollment 会话状态；
-- 每个 Engine 使用自己的 `tenantId + userId` 身份作用域访问共享 Store；
-- PostgreSQL Store 可以被多个 Gateway 实例共同使用。
+### 2. Overlap Detection + Speech Separation
 
-### 统一异步 Speaker Identity Store
-
-新增稳定接口：
+新增可选 SepFormer 分离链路：
 
 ```text
-SpeakerIdentityStore
-├─ createPerson
-├─ getPerson
-├─ listPeople
-├─ getProfileByPerson
-├─ addVoiceSample
-├─ identify
-├─ deletePerson
-└─ close
+Mixed Audio
+↓
+SepFormer
+↓
+Source A / Source B
+↓
+Energy Validation
++
+Per-source Speaker Embedding
+↓
+Overlap Detection
 ```
 
-数据库实现需要异步 I/O，因此 `AudioIntelligenceEngine.observeSpeaker()` 和 `ProgressiveVoiceEnrollmentManager` 的持久化相关路径已经升级为异步。
+如果第二音源具有足够能量，并且两个音源的 Speaker Embedding 明显不同，则将该轮标记为重叠讲话。
 
-Speaker Provider 或 Identity Store 异常仍然不能成为 ASR → LLM → TTS 主链路的单点故障。Speaker 分析 Promise 的错误继续由 Realtime Session 捕获并降级。
+增强模型采用懒加载。SepFormer 加载或推理失败时，系统自动降级到普通 diarization，不阻断实时 ASR / LLM / TTS。
 
-### PostgreSQL 数据模型
+### 3. Target Speaker Extraction
 
-新增初始化迁移：
+专注模式现在支持目标主人提取：
 
 ```text
-deploy/postgres/init/001_speaker_identity.sql
+混合多人声音
++
+已确认 Owner Voice Profile centroid
+↓
+Speech Separation
+↓
+逐音轨 Speaker Similarity
+↓
+选择最接近 Owner 的音轨
+↓
+独立转写 Owner Audio
 ```
 
-核心表：
+当检测到重叠讲话，并且目标主人匹配达到置信阈值时，Conversation Brain 使用主人音轨的独立 transcript，而不是混合 ASR transcript。
+
+如果无法可靠提取主人，系统采用保守策略过滤该轮，避免把旁人的混合内容误认为主人指令。
+
+### 4. Group Conversation Transcript
+
+Realtime Protocol 新增：
 
 ```text
-persons
-├─ id
-├─ tenant_id
-├─ user_id
-├─ name
-├─ relation
-├─ is_owner
-├─ created_at
-└─ updated_at
-
-speaker_profiles
-├─ id
-├─ person_id
-├─ status
-├─ confidence
-├─ centroid_encrypted
-├─ centroid_search_embedding
-├─ embedding_dimensions
-├─ sample_count
-├─ created_at
-└─ updated_at
-
-speaker_samples
-├─ id
-├─ profile_id
-├─ encrypted_embedding
-├─ quality
-├─ environment
-├─ proximity
-├─ source_session_id
-└─ created_at
+transcript.group
 ```
 
-`persons → speaker_profiles → speaker_samples` 使用级联删除，删除人物时会同时删除长期声纹数据。
+每个 segment 包含：
 
-### 声纹加密存储
+- `startMs / endMs`
+- `speaker`
+- `text`
+- `overlap`
+- `confidence`
 
-Canonical Speaker Embedding 不直接明文写入数据库。
-
-当前实现：
+多人模式进入 LLM 的上下文可以变成：
 
 ```text
-Voice Sample / Centroid
-↓
-JSON 序列化
-↓
-AES-256-GCM
-├─ 32-byte server key
-├─ random 96-bit IV
-├─ authentication tag
-└─ AAD 绑定 tenant / user / profile / sample
-↓
-BYTEA
+[主人] 明天八点出发吧
+[小王] 会不会太早
+[小李] 机场比较远
 ```
 
-因此把某个租户的密文复制到另一个租户或人物上下文后，AAD 不一致会导致认证解密失败。
+如果人物身份未知，则保留稳定的 `speaker_n` 标签。
 
-当前不默认保存注册原始录音，只保存声纹 embedding 及样本质量、环境、距离和来源会话等元数据。
+### 5. Social Conversation Manager 完整实时接入
 
-### pgvector 候选召回策略
+此前 Social Manager 只有领域规则，本版本已经接入真实会话状态。
 
-直接把 canonical embedding 放入 pgvector 会绕过应用层加密，因此 v0.2.2 不这样做。
+实时输入信号包括：
 
-当前使用：
+- 是否明确叫到 Aipany；
+- 是否直接向 AI 提问；
+- 当前是否存在人类重叠讲话；
+- 自然停顿长度；
+- 当前内容的 helpfulness / urgency / novelty；
+- 最近 AI 主动插话频率；
+- 距离 AI 上一次发言的时间；
+- 用户配置的 `socialProactivity`；
+- Environment Intelligence 的安全风险事件。
+
+输出：
 
 ```text
-Canonical Embedding
-↓
-按 tenantId + userId 派生搜索投影上下文
-↓
-密钥派生 Signed Permutation 正交变换
-↓
-pgvector centroid_search_embedding
+respond
+stay_silent
+intervene
 ```
 
-该变换保持 cosine similarity，因此 pgvector 可以先召回候选 Profile；最终身份评分仍会：
+新增 `social.decision` 协议事件，方便客户端和调试系统观察场控决策。
 
-1. 解密候选 centroid；
-2. 解密候选 Voice Samples；
-3. 使用原有 top samples + centroid 评分逻辑做精确判断。
+高置信度安全风险允许在自然停顿后触发 `urgent_intervention`，但不会在人类仍重叠讲话时抢话。
 
-不同 tenant/user 作用域使用不同搜索投影，降低数据库泄露后跨作用域直接关联同一声音的风险。
+### 6. Environment Intelligence
 
-注意：搜索投影仍属于敏感的派生生物识别模板，必须和数据库本身一起严格访问控制，不能视为匿名数据。
+Audio Intelligence Service 新增 AudioSet AST 环境声音分类，默认模型：
 
-### 多租户 / 用户作用域
-
-`session.start.session` 新增：
-
-```json
-{
-  "tenantId": "tenant-a",
-  "userId": "user-123"
-}
+```text
+MIT/ast-finetuned-audioset-10-10-0.4593
 ```
 
-`tenantId` 为兼容旧客户端提供 `default` 默认值。
+输出：
 
-所有人物读取、样本写入、身份识别和删除都强制带 `tenantId + userId` 条件，避免 Store 层跨作用域读取。
+- scene；
+- scene confidence；
+- noise level；
+- top environment events。
 
-安全边界说明：当前 Gateway 仍主要使用共享 `AIPANY_GATEWAY_TOKEN`，因此生产多租户部署还需要把 tenant/user 身份和真正的认证凭证绑定，不能只信任客户端自报字段。v0.2.2 完成的是数据访问层隔离，不宣称已经完成完整 IAM。
+AST 不可用时自动降级到基于音频能量的环境估计。
 
-### 删除能力
+环境结果通过：
+
+```text
+environment.updated
+```
+
+下发，并作为概率上下文提供给 Conversation Brain。低置信度环境事件不能被当作确定事实；只有高风险事件可以影响主动插话。
+
+### 7. Streaming Audio Front-End
+
+Gateway 新增：
+
+```text
+StreamingAudioFrontEnd
+```
+
+服务端基础链路包括：
+
+- Delay-and-Sum 多麦 Beamforming；
+- AEC：使用服务器实际播放的 TTS PCM 作为 far-end reference；
+- Noise Suppression；
+- AGC；
+- 轻量 Dereverb；
+- Soft Limiter。
+
+严格保留双支路：
+
+```text
+Beamformed Raw Audio
+├─ 原始支路 → Speaker / Environment Intelligence
+└─ 增强支路 → AEC / NS / AGC / Dereverb → ASR
+```
+
+客户端协议允许声明 1-8 声道 PCM，并可以提供每个麦克风的 `beamformingDelaysSamples`。
+
+说明：服务端实现是通用可运行的基础 DSP，不宣称替代设备侧 WebRTC APM 或专业阵列 DSP。支持这些能力的 App / 硬件仍应优先在本地做低延迟前处理。
+
+### 8. 多租户 IAM
+
+新增 HS256 JWT 鉴权：
+
+- `tenant_id` 绑定 Tenant；
+- `sub / user_id` 绑定 User；
+- `scope / scopes` 控制 `realtime`、`speaker:read`、`speaker:write`；
+- 支持 `iss / aud / exp / nbf` 校验；
+- `session.start` 中客户端声明的 tenant/user 必须和 JWT claims 一致。
+
+旧 `AIPANY_GATEWAY_TOKEN` 继续作为兼容模式。
+
+### 9. 声纹授权、撤销和审计
 
 新增协议：
 
 ```text
-speaker.identity.delete
-speaker.identity.deleted
+speaker.consent.grant
+speaker.consent.revoke
+speaker.consent.status
+speaker.identity.list
 ```
 
-删除操作只能在当前会话的 `tenantId + userId` 作用域内执行。
+默认 `SPEAKER_CONSENT_REQUIRED=true`。
 
-PostgreSQL 外键使用 `ON DELETE CASCADE`，删除 Person 时其 Profile 和 Samples 一并删除。
+未授权时：
 
-### Docker Compose
+- 可以继续普通实时对话；
+- 可以继续匿名 Session Speaker 跟踪和多人模式建议；
+- 不进行长期人物身份匹配；
+- 不允许开始长期声纹 Enrollment。
+
+撤销授权时可以选择立即删除当前用户全部 Person / Voice Profile / Voice Samples。
+
+PostgreSQL 新增：
+
+```text
+speaker_consents
+speaker_audit_log
+```
+
+审计只记录操作元数据，不记录原始音频和 embedding。
+
+### 10. Speaker Identity Keyring 与密钥轮换
+
+v0.3 新增 `KeyringPostgresSpeakerIdentityStore`。
+
+密文格式升级到 v2：
+
+```text
+version
++
+key id
++
+AES-256-GCM iv
++
+auth tag
++
+ciphertext
+```
+
+能力：
+
+- active key 负责所有新写入；
+- keyring 中历史 key 继续解密旧数据；
+- v0.2 legacy v1 单密钥密文仍可读取；
+- pgvector search key 与数据加密 key 独立；
+- 更换 active encryption key 不改变搜索投影空间。
+
+提供：
+
+```bash
+npm --workspace @aipany/realtime-gateway run speaker:rotate-keys
+```
+
+用于把历史 Profile / Samples 在线重加密到 active key。
+
+### 11. 新增/升级协议
 
 新增：
 
 ```text
-postgres
-└─ pgvector/pgvector:pg16
+transcript.group
+environment.updated
+social.decision
+speaker.target.extracted
+audio.frontend.metrics
+speaker.consent.*
+speaker.identity.list
 ```
 
-并增加：
+`session.start` 新增：
+
+- `assistantAliases`
+- `inputAudio.channels`
+- `inputAudio.beamformingDelaysSamples`
+
+### 12. 容错原则
+
+完整架构继续遵守：
 
 ```text
-postgres-data
+增强能力失败
+≠
+核心语音链路失败
 ```
 
-持久卷。
+- Speaker Embedding 失败：继续 ASR / LLM / TTS；
+- Diarization 失败：退回单轮 Speaker Embedding；
+- SepFormer 失败：退回普通 diarization；
+- AST 失败：退回轻量 Environment 估计；
+- Whisper segment transcription 失败：退回 Qwen 主 transcript；
+- Audio Front-End 单帧异常：记录错误并继续音频输入。
 
-全新数据库卷会自动执行 `deploy/postgres/init/001_speaker_identity.sql`。已有数据库或已有数据卷不会因为重新启动容器自动重复执行初始化脚本，升级部署必须显式执行迁移。
-
-### 新环境变量
-
-```text
-SPEAKER_IDENTITY_STORE=memory|postgres
-DATABASE_URL
-SPEAKER_IDENTITY_ENCRYPTION_KEY
-SPEAKER_IDENTITY_DATABASE_SSL
-SPEAKER_IDENTITY_DB_POOL_MAX
-SPEAKER_IDENTITY_MATCH_CANDIDATES
-```
-
-默认仍为 `memory`，避免未配置数据库和加密密钥时阻塞现有语音链路。
-
-启用 `postgres` 时必须提供：
-
-- `DATABASE_URL`
-- 32 字节 Base64 或 64 位 Hex 的 `SPEAKER_IDENTITY_ENCRYPTION_KEY`
-
-### 验证
+### 13. 验证
 
 新增测试覆盖：
 
-- 多样本 Profile 从 `learning` 进入 `confirmed`；
-- 低相似度不强行认人；
-- tenant/user 作用域隔离；
-- 删除人物同步删除内存 Voice Profile；
-- AES-GCM 正确加解密；
-- AAD 不一致时拒绝解密；
-- 不同作用域使用不同搜索投影；
-- 搜索投影保持 cosine similarity。
+- 多麦波束合成；
+- AGC；
+- AEC reference；
+- Social Turn signals；
+- Environment urgency；
+- JWT tenant/user 绑定和 scope；
+- Keyring v2 加密；
+- legacy v1 解密；
+- 稳定 search projection；
+- AAD 防跨作用域解密。
 
-### 当前仍未完成
-
-v0.2.2 仍不宣称完成：
-
-- 完整用户授权 / IAM；
-- 声纹密钥轮换和多版本 keyring；
-- 声纹数据访问审计日志；
-- Streaming Speaker Diarization；
-- Overlap Detection / Speech Separation；
-- Target Speaker Extraction；
-- Environment Intelligence；
-- AEC / NS / AGC / Dereverb / Beamforming。
-
-下一阶段建议继续：
+CI 现在执行：
 
 ```text
-Streaming Speaker Diarization
-↓
-Speaker-attributed Group Transcript
-↓
-Social Conversation Manager 完整实时接入
+python3 -m compileall services/speaker-intelligence/app
+npm install
+npm run typecheck
+npm test
+npm run build
 ```
 
-详细设计见：
+---
 
-- `docs/SPEAKER_INTELLIGENCE.md`
-- `docs/SPEAKER_IDENTITY_PERSISTENCE.md`
+## 2026-07-20 · v0.2.2 Encrypted Speaker Identity Persistence
+
+### 核心完成
+
+- 将 `SpeakerIdentityStore` 从单个 `RealtimeSession` 生命周期提升为 Gateway 共享依赖；
+- 抽象同步/异步统一 Store 接口；
+- 新增 PostgreSQL + pgvector 持久化；
+- 数据模型：`persons / speaker_profiles / speaker_samples`；
+- canonical centroid / sample embedding 使用 AES-256-GCM 应用层加密；
+- AAD 绑定 tenant / user / profile / sample 上下文；
+- pgvector 只保存 keyed orthogonal search projection；
+- `tenantId + userId` 数据层隔离；
+- 新增人物/声纹删除协议；
+- PostgreSQL 级联删除 Profile / Samples；
+- 默认保留 Memory Store 作为开发和降级实现。
+
+详细设计见 `docs/SPEAKER_IDENTITY_PERSISTENCE.md`。
 
 ---
 
 ## 2026-07-20 · v0.2.1 Speaker Intelligence Provider
 
-### 本次目标
+### 核心完成
 
-把 v0.2 中预留的 Speaker Intelligence 接口接入真实声纹模型，使实时音频产生可用于人物识别和渐进式学习的 Speaker Embedding。
-
-新增链路：
-
-```text
-客户端持续 PCM
-↓
-Qwen Server VAD
-↓
-UtteranceSpeakerAnalyzer
-├─ 350ms pre-roll
-└─ 单轮语音缓存
-↓
-HttpSpeakerIntelligenceProvider
-↓
-services/speaker-intelligence
-↓
-SpeechBrain ECAPA-TDNN
-↓
-SessionSpeakerTracker
-↓
-SpeakerObservation
-↓
-Identity / Enrollment / Mode Manager
-```
-
-### 已完成
-
-- 独立 Speaker Intelligence Python 服务；
-- `speechbrain/spkrec-ecapa-voxceleb` Speaker Embedding；
-- HTTP Provider 抽象；
-- Qwen Server VAD 轮次边界复用；
+- 独立 `services/speaker-intelligence` 服务；
+- SpeechBrain ECAPA-TDNN Speaker Embedding；
+- `HttpSpeakerIntelligenceProvider`；
+- Qwen Server VAD 轮次缓存；
 - 约 350ms pre-roll；
-- 会话级 `speaker_1 / speaker_2 / ...` 在线聚类；
-- `speaker.identified` / `speaker.filtered`；
+- 会话级 `SessionSpeakerTracker`；
+- `speaker.identified / speaker.filtered`；
 - 多人模式 Speaker Attribution；
-- 专注模式只过滤已可靠确认的非主人；
-- Speaker Provider 超时或失败时主语音链路继续。
-
-### 能力边界
-
-当前会话级聚类不是专业 Streaming Diarization，不能可靠解决两个人同时讲话，也没有 Speech Separation 或 Target Speaker Extraction。
+- 专注模式保守过滤已确认非主人；
+- Provider 超时/失败不阻断核心实时语音链路。
 
 ---
 
 ## 2026-07-20 · v0.2 Audio Intelligence Foundation
 
-### 架构升级
+### 核心完成
 
-Aipany 从单纯的级联实时语音链路升级为：
+建立三层架构：
 
 ```text
 Audio Intelligence
@@ -324,59 +394,26 @@ Social Intelligence
 Conversation Intelligence
 ```
 
-新增 `@aipany/audio-intelligence`，核心模块包括：
+新增：
 
-- `AudioIntelligenceEngine`
-- `ModeManager`
-- `SpeakerIdentityStore`
-- `ProgressiveVoiceEnrollmentManager`
-- `SocialConversationManager`
-- Speaker / Diarization / Environment Provider Interfaces
-
-### 交互模式
-
-支持：
-
-- `owner_focus`
-- `group`
-- `auto`
-
-模式可以通过 App/设备控制、自然语言命令和系统建议切换。
-
-### 渐进式声纹记忆
-
-人物身份采用：
-
-```text
-Person
-↓
-Voice Profile
-↓
-多个 Voice Sample
-↓
-加权 centroid + 多样本相似度
-```
-
-人物只有在样本数量和内部一致性达到阈值后才进入 `confirmed`。
-
-### Social Conversation Manager
-
-基础动作：
-
-- `respond`
-- `stay_silent`
-- `intervene`
-
-评分考虑是否明确叫 AI、是否直接提问、自然停顿、重叠讲话、价值、紧急程度、新颖程度、AI 最近插话频率和用户主动程度。
+- `@aipany/audio-intelligence`；
+- `AudioIntelligenceEngine`；
+- `ModeManager`；
+- `ProgressiveVoiceEnrollmentManager`；
+- `SocialConversationManager`；
+- `auto / owner_focus / group`；
+- Speaker / Diarization / Environment Provider 抽象；
+- 多样本 Voice Profile；
+- 渐进式人物声纹学习。
 
 ---
 
 ## 2026-07-20 · v0.1 Cascaded Realtime Voice
 
-第一版从旧 OpenAI Realtime 专用实现切换为可控的级联实时语音链路：
+### 核心架构
 
 ```text
-设备持续 PCM
+Device PCM
 ↓
 Qwen3 Realtime ASR
 ↓
@@ -384,22 +421,19 @@ OpenAI-compatible Text LLM
 ↓
 Emotion Director
 ↓
-Qwen3 Realtime TTS
+Qwen Realtime TTS
 ↓
-流式 PCM 播放
+Streaming PCM
 ```
 
-已建立：
+### 已建立能力
 
-- WebSocket 持续会话；
-- Streaming ASR；
-- Streaming LLM；
-- Streaming TTS；
+- WebSocket 长连接；
+- Streaming ASR / LLM / TTS；
 - Server VAD；
 - Barge-in；
 - LLM / TTS Cancel；
 - 客户端播放队列清空协议；
-- ASR 情绪 → TTS 表达控制；
-- 上下文裁剪。
-
-核心原则保持不变：客户端只依赖 Aipany 统一协议，不直接绑定 Qwen、OpenAI、SpeechBrain 或任何具体 Provider。
+- ASR 情绪到 TTS 表达指令；
+- 统一 Aipany Protocol；
+- 设备不直接绑定具体 AI Provider。
