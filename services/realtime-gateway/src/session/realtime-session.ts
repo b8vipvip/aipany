@@ -6,10 +6,12 @@ import {
   type InteractionMode,
   type ServerEvent,
   type SessionStartEvent,
+  type SpeakerAttribution,
   type UserEmotion,
 } from "@aipany/protocol";
 import {
   AudioIntelligenceEngine,
+  HttpSpeakerIntelligenceProvider,
   type SpeakerObservation,
 } from "@aipany/audio-intelligence";
 import type { AppConfig } from "../config.js";
@@ -18,12 +20,18 @@ import { QwenTtsRealtimeClient } from "../providers/qwen-tts.js";
 import { OpenAiCompatibleLlm, type ChatMessage } from "../providers/openai-compatible-llm.js";
 import { EmotionDirector } from "../pipeline/emotion-director.js";
 import { StreamingTextChunker } from "../pipeline/text-chunker.js";
+import { UtteranceSpeakerAnalyzer } from "../speaker/utterance-speaker-analyzer.js";
 
 interface ActiveResponse {
   id: string;
   abortController: AbortController;
   tts?: QwenTtsRealtimeClient;
   interrupted: boolean;
+}
+
+interface SpeakerAnalysisOutcome {
+  observation: SpeakerObservation;
+  attribution?: SpeakerAttribution;
 }
 
 export class RealtimeSession {
@@ -34,6 +42,8 @@ export class RealtimeSession {
   private history: ChatMessage[] = [];
   private activeResponse?: ActiveResponse;
   private audioIntelligence?: AudioIntelligenceEngine;
+  private speakerAnalyzer?: UtteranceSpeakerAnalyzer;
+  private readonly pendingSpeakerAnalyses: Array<Promise<SpeakerAnalysisOutcome | undefined>> = [];
   private activeEnrollmentId?: string;
   private socialProactivity = 0.45;
   private started = false;
@@ -56,6 +66,24 @@ export class RealtimeSession {
         initialActiveMode: event.session.interactionMode === "group" ? "group" : "owner_focus",
       },
     });
+
+    if (this.config.speaker.enabled) {
+      const provider = new HttpSpeakerIntelligenceProvider({
+        baseUrl: this.config.speaker.baseUrl,
+        token: this.config.speaker.token,
+        timeoutMs: this.config.speaker.timeoutMs,
+      });
+      this.speakerAnalyzer = new UtteranceSpeakerAnalyzer(provider, {
+        minAudioMs: this.config.speaker.minAudioMs,
+        preRollMs: this.config.speaker.preRollMs,
+        sessionMatchThreshold: this.config.speaker.sessionMatchThreshold,
+      });
+      void provider.healthCheck?.().then((ok) => {
+        if (!ok && !this.closed) {
+          this.sendError("SPEAKER_INTELLIGENCE_UNAVAILABLE", "Speaker Intelligence 服务当前不可用，语音对话将继续但暂不进行声纹识别", true);
+        }
+      });
+    }
 
     const systemPrompt = event.session.systemPrompt?.trim() || this.config.conversation.defaultSystemPrompt;
     this.history = [{ role: "system", content: systemPrompt }];
@@ -80,10 +108,14 @@ export class RealtimeSession {
     this.asr = asr;
 
     asr.on("speechStarted", () => {
+      this.speakerAnalyzer?.startSpeech();
       this.send({ type: "input_audio_buffer.speech_started" });
       this.interrupt("barge_in");
     });
-    asr.on("speechStopped", () => this.send({ type: "input_audio_buffer.speech_stopped" }));
+    asr.on("speechStopped", () => {
+      this.queueSpeakerAnalysis();
+      this.send({ type: "input_audio_buffer.speech_stopped" });
+    });
     asr.on("partial", (result) => {
       this.send({
         type: "transcript.partial",
@@ -94,13 +126,8 @@ export class RealtimeSession {
     });
     asr.on("final", (result) => {
       if (!result.text) return;
-      this.send({
-        type: "transcript.final",
-        text: result.text,
-        emotion: result.emotion,
-        language: result.language,
-      });
-      void this.handleFinalTranscript(result.text, result.emotion);
+      const speakerAnalysis = this.pendingSpeakerAnalyses.shift();
+      void this.handleFinalTranscript(result.text, result.emotion, result.language, speakerAnalysis);
     });
     asr.on("error", (error) => this.sendError("ASR_ERROR", error.message, true));
 
@@ -110,6 +137,7 @@ export class RealtimeSession {
 
   appendAudio(audio: Buffer): void {
     if (!this.started || this.closed) return;
+    this.speakerAnalyzer?.append(audio);
     this.asr?.appendAudio(audio);
   }
 
@@ -165,14 +193,14 @@ export class RealtimeSession {
   }
 
   /**
-   * 供下一阶段真实 Speaker Provider 调用。
-   * 当前千问 ASR 本身不提供说话人分离，因此 v0.2 先把统一入口和业务闭环打通。
+   * Speaker Provider 的统一业务入口。
+   * 它同时驱动长期身份匹配、渐进式声纹学习、自动模式建议以及客户端说话人事件。
    */
-  observeSpeaker(observation: SpeakerObservation): void {
+  observeSpeaker(observation: SpeakerObservation): SpeakerAttribution | undefined {
     const engine = this.audioIntelligence;
-    if (!engine) return;
+    if (!engine) return undefined;
 
-    const { suggestion } = engine.observeSpeaker(observation);
+    const { match, suggestion } = engine.observeSpeaker(observation);
     if (suggestion) {
       this.send({
         type: "mode.suggestion",
@@ -184,15 +212,36 @@ export class RealtimeSession {
       });
     }
 
-    if (!this.activeEnrollmentId) return;
-    const result = engine.enrollments.ingest(this.activeEnrollmentId, observation);
-    this.send({
-      type: "speaker.enrollment.updated",
-      enrollmentId: result.state.id,
-      acceptedSamples: result.state.acceptedSamples,
-      status: result.state.status,
-    });
-    if (result.state.status === "confirmed") this.activeEnrollmentId = undefined;
+    let enrollmentPersonId: string | undefined;
+    let enrollmentPersonName: string | undefined;
+    let enrollmentConfirmed = false;
+    if (this.activeEnrollmentId) {
+      const result = engine.enrollments.ingest(this.activeEnrollmentId, observation);
+      enrollmentPersonId = result.state.personId;
+      enrollmentPersonName = result.state.personName;
+      enrollmentConfirmed = result.state.status === "confirmed";
+      this.send({
+        type: "speaker.enrollment.updated",
+        enrollmentId: result.state.id,
+        acceptedSamples: result.state.acceptedSamples,
+        status: result.state.status,
+      });
+      if (result.state.status === "confirmed") this.activeEnrollmentId = undefined;
+    }
+
+    const enrolledPerson = enrollmentPersonId ? engine.identities.getPerson(enrollmentPersonId) : undefined;
+    const attribution: SpeakerAttribution = {
+      sessionSpeakerId: observation.sessionSpeakerId,
+      personId: match?.person?.id ?? enrollmentPersonId,
+      personName: match?.person?.name ?? enrollmentPersonName,
+      isOwner: match?.person?.isOwner ?? enrolledPerson?.isOwner ?? Boolean(observation.isOwnerHint),
+      confident: Boolean(match?.confident || enrollmentConfirmed),
+      similarity: match?.similarity ?? (enrollmentPersonId ? 1 : 0),
+      observationConfidence: observation.confidence,
+    };
+
+    this.send({ type: "speaker.identified", speaker: attribution });
+    return attribution;
   }
 
   close(): void {
@@ -201,24 +250,90 @@ export class RealtimeSession {
     this.interrupt("client_cancel");
     this.asr?.close();
     this.asr = undefined;
+    this.speakerAnalyzer?.reset();
+    this.speakerAnalyzer = undefined;
+    this.pendingSpeakerAnalyses.splice(0);
   }
 
-  private async handleFinalTranscript(text: string, emotion: UserEmotion): Promise<void> {
+  private queueSpeakerAnalysis(): void {
+    const analysis = this.speakerAnalyzer?.stopSpeech();
+    if (!analysis) return;
+
+    const processed = analysis
+      .then((observation): SpeakerAnalysisOutcome | undefined => {
+        if (!observation || this.closed) return undefined;
+        return {
+          observation,
+          attribution: this.observeSpeaker(observation),
+        };
+      })
+      .catch((error) => {
+        if (!this.closed) {
+          this.sendError(
+            "SPEAKER_INTELLIGENCE_ERROR",
+            error instanceof Error ? error.message : String(error),
+            true,
+          );
+        }
+        return undefined;
+      });
+
+    this.pendingSpeakerAnalyses.push(processed);
+    if (this.pendingSpeakerAnalyses.length > 8) this.pendingSpeakerAnalyses.shift();
+  }
+
+  private async handleFinalTranscript(
+    text: string,
+    emotion: UserEmotion,
+    language?: string,
+    speakerAnalysis?: Promise<SpeakerAnalysisOutcome | undefined>,
+  ): Promise<void> {
     if (this.closed) return;
     this.interrupt("new_turn");
 
-    const modeCommand = this.audioIntelligence?.detectModeCommand(text);
+    const outcome = await waitForSpeakerAnalysis(speakerAnalysis, this.config.speaker.analysisWaitMs);
+    const speaker = outcome?.attribution;
+
+    this.send({
+      type: "transcript.final",
+      text,
+      emotion,
+      language,
+      speaker,
+    });
+
+    const modeStateBeforeCommand = this.audioIntelligence?.modes.getState();
+    const isConfidentNonOwner = Boolean(speaker?.confident && speaker.personId && !speaker.isOwner);
+    const modeCommand = !isConfidentNonOwner ? this.audioIntelligence?.detectModeCommand(text) : undefined;
     if (modeCommand) this.setInteractionMode(modeCommand, "voice_command");
 
-    this.history.push({ role: "user", content: text });
+    const modeState = this.audioIntelligence?.modes.getState() ?? modeStateBeforeCommand;
+    if (modeState?.activeMode === "owner_focus" && isConfidentNonOwner && speaker) {
+      this.send({
+        type: "speaker.filtered",
+        sessionSpeakerId: speaker.sessionSpeakerId,
+        personId: speaker.personId,
+        personName: speaker.personName,
+        reason: "owner_focus_non_owner",
+      });
+      return;
+    }
+
+    const userContent = formatSpeakerAttributedText(text, speaker, modeState?.activeMode);
+    this.history.push({ role: "user", content: userContent });
     this.trimHistory();
 
     const requestMessages = [...this.history];
-    const modeState = this.audioIntelligence?.modes.getState();
     if (modeState) {
       requestMessages.push({
         role: "system",
         content: buildModeInstruction(modeState.configuredMode, modeState.activeMode, this.socialProactivity, Boolean(modeCommand)),
+      });
+    }
+    if (speaker) {
+      requestMessages.push({
+        role: "system",
+        content: buildSpeakerInstruction(speaker),
       });
     }
 
@@ -341,6 +456,26 @@ export class RealtimeSession {
   }
 }
 
+function formatSpeakerAttributedText(
+  text: string,
+  speaker: SpeakerAttribution | undefined,
+  activeMode: "owner_focus" | "group" | undefined,
+): string {
+  if (activeMode !== "group" || !speaker) return text;
+  const label = speaker.personName ?? speaker.sessionSpeakerId;
+  return `[${label}] ${text}`;
+}
+
+function buildSpeakerInstruction(speaker: SpeakerAttribution): string {
+  const identity = speaker.personName
+    ? `当前发言者识别为“${speaker.personName}”${speaker.isOwner ? "，是设备主人" : ""}`
+    : `当前发言者暂记为 ${speaker.sessionSpeakerId}，尚未确认真实身份`;
+  const confidence = speaker.confident
+    ? `身份匹配置信较高，相似度=${speaker.similarity.toFixed(3)}`
+    : `身份尚未可靠确认，相似度=${speaker.similarity.toFixed(3)}，不要擅自断言其真实姓名`;
+  return `${identity}。${confidence}。`;
+}
+
 function buildModeInstruction(
   configuredMode: InteractionMode,
   activeMode: "owner_focus" | "group",
@@ -349,11 +484,29 @@ function buildModeInstruction(
 ): string {
   const activeDescription = activeMode === "group"
     ? "当前处于多人聊天模式。要理解不同参与者的上下文，不要每句话都抢答；只有被明确询问，或出现非常合适且有价值的自然插话机会时才发言。"
-    : "当前处于专注模式。主要和设备主人持续交流，忽略无关背景对话。";
+    : "当前处于专注模式。主要和设备主人持续交流，已确认的非主人发言应被系统过滤。";
   const switchInstruction = switchedByVoice
     ? "用户刚刚通过语音切换了交互模式，请先用一句很自然的话简短确认，然后继续当前对话。"
     : "";
   return `${activeDescription} 用户配置模式=${configuredMode}，主动参与程度=${proactivity.toFixed(2)}。${switchInstruction}`;
+}
+
+async function waitForSpeakerAnalysis(
+  analysis: Promise<SpeakerAnalysisOutcome | undefined> | undefined,
+  waitMs: number,
+): Promise<SpeakerAnalysisOutcome | undefined> {
+  if (!analysis || waitMs <= 0) return undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      analysis,
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), waitMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function isAbortError(error: unknown): boolean {
