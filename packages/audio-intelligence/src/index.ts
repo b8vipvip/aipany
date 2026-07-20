@@ -3,4 +3,6 @@ export * from "./speaker-identity-store.js";
 export * from "./progressive-enrollment.js";
 export * from "./mode-manager.js";
 export * from "./social-conversation-manager.js";
+export * from "./session-speaker-tracker.js";
+export * from "./providers/http-speaker-intelligence-provider.js";
 export * from "./audio-intelligence-engine.js";
