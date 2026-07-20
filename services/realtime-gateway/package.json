@@ -1,6 +1,6 @@
 {
   "name": "@aipany/realtime-gateway",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
@@ -12,7 +12,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@aipany/audio-intelligence": "0.2.0",
+    "@aipany/audio-intelligence": "0.2.2",
     "@aipany/protocol": "0.1.0",
     "ws": "^8.18.0",
     "zod": "^3.24.2"
