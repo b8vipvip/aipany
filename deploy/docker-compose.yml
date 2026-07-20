@@ -1,4 +1,14 @@
 services:
+  speaker-intelligence:
+    build:
+      context: ..
+      dockerfile: services/speaker-intelligence/Dockerfile
+    env_file:
+      - ../.env
+    restart: unless-stopped
+    volumes:
+      - speaker-models:/models
+
   realtime-gateway:
     build:
       context: ..
@@ -6,5 +16,10 @@ services:
     env_file:
       - ../.env
     restart: unless-stopped
+    depends_on:
+      - speaker-intelligence
     ports:
       - "127.0.0.1:3000:3000"
+
+volumes:
+  speaker-models:
