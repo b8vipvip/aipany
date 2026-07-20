@@ -8,7 +8,7 @@ import { RuntimeApiConfigStore } from "../src/admin/runtime-api-config-store.js"
 test("runtime api config persists, reloads and never exposes secret values", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "aipany-runtime-config-"));
   const filePath = path.join(dir, "runtime-api-config.json");
-  const keys = ["DASHSCOPE_API_KEY", "LLM_API_KEY", "LLM_BASE_URL"] as const;
+  const keys = ["DASHSCOPE_API_KEY", "LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL"] as const;
   const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
 
   try {
@@ -33,15 +33,14 @@ test("runtime api config persists, reloads and never exposes secret values", asy
     assert.equal(fileMode, 0o600);
     assert.match(await readFile(filePath, "utf8"), /LLM_MODEL/);
 
-    delete process.env.DASHSCOPE_API_KEY;
-    delete process.env.LLM_API_KEY;
-    delete process.env.LLM_BASE_URL;
+    for (const key of keys) delete process.env[key];
 
     const reloaded = new RuntimeApiConfigStore({ filePath, adminToken: "test-admin-token" });
     await reloaded.loadAndApply();
     assert.equal(process.env.DASHSCOPE_API_KEY, "dashscope-secret");
     assert.equal(process.env.LLM_API_KEY, "llm-secret");
     assert.equal(process.env.LLM_BASE_URL, "https://example.com/v1");
+    assert.equal(process.env.LLM_MODEL, "example-model");
   } finally {
     for (const key of keys) {
       const value = previous[key];
