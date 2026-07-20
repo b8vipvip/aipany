@@ -45,9 +45,9 @@ export interface SpeakerIdentityStore {
   addVoiceSample(scope: SpeakerIdentityScope, input: AddVoiceSampleInput): MaybePromise<VoiceProfile>;
   identify(scope: SpeakerIdentityScope, embedding: number[]): MaybePromise<SpeakerMatch>;
   deletePerson(scope: SpeakerIdentityScope, personId: string): MaybePromise<boolean>;
-  deleteAllPeople(scope: SpeakerIdentityScope): MaybePromise<number>;
-  getConsent(scope: SpeakerIdentityScope): MaybePromise<SpeakerConsentState>;
-  setConsent(scope: SpeakerIdentityScope, granted: boolean, actorId?: string): MaybePromise<SpeakerConsentState>;
+  deleteAllPeople?(scope: SpeakerIdentityScope): MaybePromise<number>;
+  getConsent?(scope: SpeakerIdentityScope): MaybePromise<SpeakerConsentState>;
+  setConsent?(scope: SpeakerIdentityScope, granted: boolean, actorId?: string): MaybePromise<SpeakerConsentState>;
   close?(): MaybePromise<void>;
 }
 
@@ -64,10 +64,6 @@ export function resolveSpeakerIdentityStoreOptions(
   };
 }
 
-/**
- * 内存实现保留给本地开发、单元测试以及数据库未启用时使用。
- * 数据按 tenantId + userId 作用域隔离，行为与 PostgreSQL Store 保持一致。
- */
 export class InMemorySpeakerIdentityStore implements SpeakerIdentityStore {
   private readonly people = new Map<string, PersonRecord>();
   private readonly profiles = new Map<string, VoiceProfile>();
@@ -151,26 +147,18 @@ export class InMemorySpeakerIdentityStore implements SpeakerIdentityStore {
     profile.samples.push(sample);
     applyProfileStatistics(profile, this.options);
     profile.updatedAt = now;
-
     return structuredClone(profile);
   }
 
   identify(scope: SpeakerIdentityScope, embedding: number[]): SpeakerMatch {
     validateEmbedding(embedding);
-
-    let best: SpeakerMatch = {
-      similarity: 0,
-      confident: false,
-    };
-
+    let best: SpeakerMatch = { similarity: 0, confident: false };
     for (const profile of this.profiles.values()) {
       const person = this.people.get(profile.personId);
       if (!person || !belongsToScope(person, scope)) continue;
       const candidate = scoreSpeakerProfile(profile, person, embedding, this.options.matchThreshold);
-      if (candidate.similarity <= best.similarity) continue;
-      best = candidate;
+      if (candidate.similarity > best.similarity) best = candidate;
     }
-
     return structuredClone(best);
   }
 
@@ -191,10 +179,7 @@ export class InMemorySpeakerIdentityStore implements SpeakerIdentityStore {
 
   getConsent(scope: SpeakerIdentityScope): SpeakerConsentState {
     validateScope(scope);
-    return structuredClone(this.consents.get(scopeKey(scope)) ?? {
-      granted: false,
-      updatedAt: 0,
-    });
+    return structuredClone(this.consents.get(scopeKey(scope)) ?? { granted: false, updatedAt: 0 });
   }
 
   setConsent(scope: SpeakerIdentityScope, granted: boolean, actorId?: string): SpeakerConsentState {
@@ -247,7 +232,6 @@ export function scoreSpeakerProfile(
   if (profile.centroid.length !== embedding.length || profile.samples.length === 0) {
     return { similarity: 0, confident: false };
   }
-
   const similarities = profile.samples
     .map((sample) => cosineSimilarity(sample.embedding, embedding))
     .sort((a, b) => b - a);
@@ -255,7 +239,6 @@ export function scoreSpeakerProfile(
   const sampleScore = top.reduce((sum, value) => sum + value, 0) / top.length;
   const centroidScore = cosineSimilarity(profile.centroid, embedding);
   const similarity = clamp(sampleScore * 0.7 + centroidScore * 0.3, -1, 1);
-
   return {
     person: structuredClone(person),
     profile: structuredClone(profile),
@@ -284,7 +267,6 @@ export function weightedCentroid(samples: VoiceSample[]): number[] {
   const dimensions = samples[0]?.embedding.length ?? 0;
   const output = new Array<number>(dimensions).fill(0);
   let totalWeight = 0;
-
   for (const sample of samples) {
     if (sample.embedding.length !== dimensions) throw new Error("Voice Profile 中存在不同维度的声纹样本");
     totalWeight += sample.quality;
@@ -292,7 +274,6 @@ export function weightedCentroid(samples: VoiceSample[]): number[] {
       output[index] = (output[index] ?? 0) + (sample.embedding[index] ?? 0) * sample.quality;
     }
   }
-
   if (totalWeight === 0) return output;
   return output.map((value) => value / totalWeight);
 }
@@ -300,7 +281,6 @@ export function weightedCentroid(samples: VoiceSample[]): number[] {
 export function calculateProfileConfidence(samples: VoiceSample[], centroid: number[]): number {
   if (samples.length === 0) return 0;
   if (samples.length === 1) return clamp(samples[0]?.quality ?? 0, 0, 1) * 0.65;
-
   const consistency =
     samples.reduce((sum, sample) => sum + Math.max(0, cosineSimilarity(sample.embedding, centroid)), 0) / samples.length;
   const quality = samples.reduce((sum, sample) => sum + sample.quality, 0) / samples.length;
@@ -309,9 +289,7 @@ export function calculateProfileConfidence(samples: VoiceSample[], centroid: num
 }
 
 export function validateEmbedding(embedding: number[]): void {
-  if (embedding.length < 2 || embedding.some((value) => !Number.isFinite(value))) {
-    throw new Error("无效的声纹向量");
-  }
+  if (embedding.length < 2 || embedding.some((value) => !Number.isFinite(value))) throw new Error("无效的声纹向量");
 }
 
 export function validateScope(scope: SpeakerIdentityScope): void {
@@ -327,5 +305,5 @@ function belongsToScope(person: PersonRecord, scope: SpeakerIdentityScope): bool
 }
 
 function scopeKey(scope: SpeakerIdentityScope): string {
-  return `${scope.tenantId}\u0000${scope.userId}`;
+  return JSON.stringify([scope.tenantId, scope.userId]);
 }
