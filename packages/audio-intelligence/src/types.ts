@@ -127,6 +127,7 @@ export interface SocialDecision {
     | "explicitly_addressed"
     | "human_overlap"
     | "proactive_opportunity"
+    | "urgent_intervention"
     | "insufficient_value"
     | "owner_turn";
 }
@@ -157,7 +158,11 @@ export interface SpeakerIntelligenceCapabilities {
   verification: boolean;
   diarization: boolean;
   streamingDiarization: boolean;
+  overlapDetection: boolean;
+  speechSeparation: boolean;
   targetSpeakerExtraction: boolean;
+  environmentAnalysis: boolean;
+  segmentTranscription: boolean;
 }
 
 export interface SpeakerEmbeddingProvider {
@@ -173,6 +178,47 @@ export interface SpeakerDiarizationSegment {
   endMs: number;
   confidence: number;
   overlap?: boolean;
+  embedding?: number[];
+  transcript?: string;
+}
+
+export interface TargetSpeakerExtractionResult {
+  matched: boolean;
+  similarity: number;
+  confidence: number;
+  transcript?: string;
+  audio?: Buffer;
+}
+
+export interface UtteranceAudioAnalysisOptions {
+  sessionId?: string;
+  mode?: ActiveInteractionMode;
+  language?: string;
+  ownerEmbedding?: number[];
+  includeTranscript?: boolean;
+  enableSeparation?: boolean;
+  enableEnvironment?: boolean;
+}
+
+export interface UtteranceAudioAnalysis {
+  embedding: number[];
+  quality: number;
+  durationMs: number;
+  model?: string;
+  dimensions?: number;
+  proximity?: SpeakerProximity;
+  diarization: SpeakerDiarizationSegment[];
+  overlapDetected: boolean;
+  environment?: EnvironmentContext;
+  targetSpeaker?: TargetSpeakerExtractionResult;
+}
+
+export interface UtteranceAudioAnalysisProvider extends SpeakerEmbeddingProvider {
+  analyzeUtterance(
+    audio: Buffer,
+    format: AudioFormatDescriptor,
+    options?: UtteranceAudioAnalysisOptions,
+  ): Promise<UtteranceAudioAnalysis>;
 }
 
 export interface SpeakerDiarizationProvider {
@@ -183,4 +229,22 @@ export interface SpeakerDiarizationProvider {
 export interface EnvironmentAnalysisProvider {
   readonly name: string;
   analyze(audio: Buffer, format: AudioFormatDescriptor): Promise<EnvironmentContext>;
+}
+
+export interface TargetSpeakerExtractionProvider {
+  readonly name: string;
+  extractTargetSpeaker(
+    audio: Buffer,
+    format: AudioFormatDescriptor,
+    ownerEmbedding: number[],
+  ): Promise<TargetSpeakerExtractionResult>;
+}
+
+export interface AudioFrontEndMetrics {
+  inputRms: number;
+  outputRms: number;
+  appliedGain: number;
+  echoAttenuation: number;
+  noiseSuppressionGain: number;
+  clippedSamples: number;
 }
