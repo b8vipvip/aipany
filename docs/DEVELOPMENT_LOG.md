@@ -2,6 +2,213 @@
 
 > 本文档用于记录每次新增的重要业务逻辑、框架、协议和架构决策。后续功能开发必须同步更新本文件，避免只改代码不留下设计上下文。
 
+## 2026-07-20 · v0.2.1 Speaker Intelligence Provider
+
+### 本次目标
+
+把 v0.2 中预留的 Speaker Intelligence 接口接入真实声纹模型，使实时音频开始产生可用于人物识别和渐进式学习的 Speaker Embedding。
+
+新增链路：
+
+```text
+客户端持续 PCM
+↓
+Qwen Server VAD
+↓
+UtteranceSpeakerAnalyzer
+↓
+HTTP Speaker Intelligence Provider
+↓
+SpeechBrain ECAPA-TDNN
+↓
+Speaker Embedding
+↓
+SessionSpeakerTracker
+↓
+SpeakerObservation
+↓
+Identity / Enrollment / Mode Manager
+```
+
+### 新增独立模型服务
+
+新增：
+
+```text
+services/speaker-intelligence/
+```
+
+第一版默认使用 `speechbrain/spkrec-ecapa-voxceleb` 提取 Speaker Embedding。
+
+模型服务接口：
+
+- `GET /health`
+- `GET /v1/capabilities`
+- `POST /v1/embedding`
+
+当前输入为 `PCM S16LE / 16kHz`。输出包括归一化 embedding、语音时长、模型名称、向量维度和轻量样本质量评分。
+
+模型第一次启动时下载到 Docker 持久卷，Gateway 只通过内部 HTTP 访问模型服务。
+
+### Provider 解耦
+
+新增：
+
+```text
+HttpSpeakerIntelligenceProvider
+```
+
+Realtime Gateway 不直接依赖 SpeechBrain SDK，而是只依赖统一的 `SpeakerEmbeddingProvider`。
+
+因此未来可以替换为：
+
+- NVIDIA NeMo / TitaNet；
+- Streaming Sortformer；
+- 商业 Speaker API；
+- 自研 GPU 推理服务；
+- 其他声纹模型。
+
+上层 Conversation / Mode / Identity 逻辑不需要因为模型变化而重写。
+
+### 实时语音轮次声纹分析
+
+新增：
+
+```text
+UtteranceSpeakerAnalyzer
+```
+
+它利用现有 Qwen Server VAD：
+
+1. 持续维护约 350ms pre-roll，避免 VAD 事件网络延迟导致句首声纹丢失。
+2. `speech_started` 后开始收集当前语音轮次。
+3. `speech_stopped` 后异步调用 Speaker Provider。
+4. 短于最小时长的片段不送模型，避免无意义推理。
+5. Speaker 分析和 ASR Final 并行执行，不阻塞主音频链路。
+
+Realtime Session 只等待有限的 `SPEAKER_ANALYSIS_WAIT_MS`。如果 Speaker Provider 慢或暂时不可用，ASR → LLM → TTS 仍然继续工作。
+
+### 会话级未知说话人追踪
+
+新增：
+
+```text
+SessionSpeakerTracker
+```
+
+它根据每个语音轮次的 embedding 做会话内在线聚类，将未知声音稳定映射为：
+
+```text
+speaker_1
+speaker_2
+speaker_3
+```
+
+该能力解决“同一会话中谁在轮流讲话”的基础问题，但它不是专业 Streaming Diarization，也不能可靠解决多人同时重叠讲话。
+
+### Realtime 协议升级
+
+新增 Speaker Attribution：
+
+```text
+sessionSpeakerId
+personId
+personName
+isOwner
+confident
+similarity
+observationConfidence
+```
+
+新增事件：
+
+```text
+speaker.identified
+speaker.filtered
+```
+
+`transcript.final` 也可以携带 Speaker Attribution。
+
+多人模式下，进入 LLM 历史的文本会变成：
+
+```text
+[小王] 我觉得吃火锅吧
+[小李] 我不能吃辣
+```
+
+如果还不知道真实名字，则使用：
+
+```text
+[speaker_2] ...
+```
+
+### 专注模式第一版真实过滤
+
+当满足全部条件时：
+
+```text
+Voice Profile 已确认
++
+当前 embedding 与该人物匹配达到阈值
++
+该人物明确不是 Owner
+```
+
+该语音轮次会产生：
+
+```text
+speaker.filtered
+```
+
+并不会进入 LLM。
+
+为了降低误杀，未知说话人或低置信度匹配不会直接被过滤。
+
+### 渐进式声纹学习开始获得真实样本
+
+v0.2 的 `ProgressiveVoiceEnrollmentManager` 现在可以接收到真实 ECAPA embedding。
+
+注册流程变为：
+
+```text
+speaker.enrollment.start
+↓
+用户/朋友连续说多个语音轮次
+↓
+每轮提取 embedding
+↓
+SessionSpeakerTracker 确保样本来自同一会话 Speaker
+↓
+Voice Profile 累积多个 Voice Sample
+↓
+内部一致性和样本数量达到阈值
+↓
+confirmed
+```
+
+### 当前明确边界
+
+本版本已经是真实 Speaker Embedding，不再是纯接口占位，但仍未实现：
+
+- Streaming Speaker Diarization；
+- 多人同时讲话 Speech Separation；
+- Target Speaker Extraction；
+- 麦克风阵列 DOA/Beamforming；
+- 环境声音分类；
+- 跨服务器重启的加密 Voice Profile 持久化。
+
+当前长期人物数据仍使用 `InMemorySpeakerIdentityStore`。这是开发阶段刻意保留的边界，因为声纹属于敏感生物识别数据，不能为了“先保存下来”而直接落明文数据库。
+
+下一优先级：实现加密的持久化 Speaker Identity Store，然后接入真正的 Streaming Diarization / Target Speaker Extraction。
+
+详细设计见：
+
+```text
+docs/SPEAKER_INTELLIGENCE.md
+```
+
+---
+
 ## 2026-07-20 · v0.2 Audio Intelligence Foundation
 
 ### 本次目标
