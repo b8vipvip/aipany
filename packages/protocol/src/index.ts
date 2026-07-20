@@ -1,5 +1,8 @@
 import { z } from "zod";
 
+export const interactionModeSchema = z.enum(["auto", "owner_focus", "group"]);
+export type InteractionMode = z.infer<typeof interactionModeSchema>;
+
 export const deviceSchema = z.object({
   deviceId: z.string().min(1),
   productId: z.string().min(1),
@@ -16,6 +19,8 @@ export const sessionStartEventSchema = z.object({
     agentId: z.string().min(1).default("default-agent"),
     locale: z.string().default("zh-CN"),
     systemPrompt: z.string().optional(),
+    interactionMode: interactionModeSchema.default("auto"),
+    socialProactivity: z.number().min(0).max(1).default(0.45),
     device: deviceSchema,
   }),
 });
@@ -25,6 +30,19 @@ export const clientControlEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("input_audio_buffer.commit") }),
   z.object({ type: z.literal("response.cancel") }),
   z.object({ type: z.literal("session.finish") }),
+  z.object({ type: z.literal("mode.set"), mode: interactionModeSchema }),
+  z.object({
+    type: z.literal("mode.suggestion.respond"),
+    suggestionId: z.string().min(1),
+    accepted: z.boolean(),
+  }),
+  z.object({
+    type: z.literal("speaker.enrollment.start"),
+    personName: z.string().min(1),
+    relation: z.string().optional(),
+    isOwner: z.boolean().optional(),
+  }),
+  z.object({ type: z.literal("speaker.enrollment.cancel"), enrollmentId: z.string().min(1) }),
   z.object({ type: z.literal("ping"), timestamp: z.number().optional() }),
 ]);
 
@@ -48,6 +66,18 @@ export type ServerEvent =
   | { type: "input_audio_buffer.speech_stopped" }
   | { type: "transcript.partial"; text: string; emotion: UserEmotion; language?: string }
   | { type: "transcript.final"; text: string; emotion: UserEmotion; language?: string }
+  | { type: "mode.changed"; configuredMode: InteractionMode; activeMode: "owner_focus" | "group"; source: string }
+  | {
+      type: "mode.suggestion";
+      suggestionId: string;
+      from: "owner_focus" | "group";
+      to: "owner_focus" | "group";
+      reason: string;
+      speakerCount: number;
+    }
+  | { type: "speaker.enrollment.started"; enrollmentId: string; personId: string; personName: string }
+  | { type: "speaker.enrollment.updated"; enrollmentId: string; acceptedSamples: number; status: string }
+  | { type: "speaker.enrollment.cancelled"; enrollmentId: string }
   | { type: "response.created"; responseId: string }
   | { type: "response.text.delta"; responseId: string; delta: string }
   | { type: "response.audio.started"; responseId: string; format: AudioFormat }
