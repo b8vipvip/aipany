@@ -15,6 +15,7 @@ export const deviceSchema = z.object({
 export const sessionStartEventSchema = z.object({
   type: z.literal("session.start"),
   session: z.object({
+    tenantId: z.string().min(1).default("default"),
     userId: z.string().min(1),
     agentId: z.string().min(1).default("default-agent"),
     locale: z.string().default("zh-CN"),
@@ -43,6 +44,7 @@ export const clientControlEventSchema = z.discriminatedUnion("type", [
     isOwner: z.boolean().optional(),
   }),
   z.object({ type: z.literal("speaker.enrollment.cancel"), enrollmentId: z.string().min(1) }),
+  z.object({ type: z.literal("speaker.identity.delete"), personId: z.string().uuid() }),
   z.object({ type: z.literal("ping"), timestamp: z.number().optional() }),
 ]);
 
@@ -96,6 +98,7 @@ export type ServerEvent =
   | { type: "speaker.enrollment.started"; enrollmentId: string; personId: string; personName: string }
   | { type: "speaker.enrollment.updated"; enrollmentId: string; acceptedSamples: number; status: string }
   | { type: "speaker.enrollment.cancelled"; enrollmentId: string }
+  | { type: "speaker.identity.deleted"; personId: string }
   | { type: "response.created"; responseId: string }
   | { type: "response.text.delta"; responseId: string; delta: string }
   | { type: "response.audio.started"; responseId: string; format: AudioFormat }
