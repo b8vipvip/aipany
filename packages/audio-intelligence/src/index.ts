@@ -1,6 +1,7 @@
 export * from "./types.js";
 export * from "./speaker-identity-store.js";
 export * from "./postgres-speaker-identity-store.js";
+export * from "./keyring-postgres-speaker-identity-store.js";
 export * from "./privacy-aware-speaker-identity-store.js";
 export * from "./progressive-enrollment.js";
 export * from "./mode-manager.js";
