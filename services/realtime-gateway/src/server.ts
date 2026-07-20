@@ -1,15 +1,31 @@
 import { createServer, type IncomingMessage } from "node:http";
 import WebSocket, { WebSocketServer } from "ws";
+import {
+  InMemorySpeakerIdentityStore,
+  KeyringPostgresSpeakerIdentityStore,
+  PrivacyAwareSpeakerIdentityStore,
+  type SpeakerIdentityStore,
+} from "@aipany/audio-intelligence";
 import { clientControlEventSchema } from "@aipany/protocol";
+import { authenticateRequest, type AuthContext } from "./auth.js";
 import type { AppConfig } from "./config.js";
 import { RealtimeSession } from "./session/realtime-session.js";
 
 export function createGatewayServer(config: AppConfig) {
+  const identityStore = createSpeakerIdentityStore(config);
+  const authContexts = new WeakMap<IncomingMessage, AuthContext>();
   const httpServer = createServer((request, response) => {
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
     if (request.method === "GET" && url.pathname === "/health") {
       response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      response.end(JSON.stringify({ ok: true, service: "aipany-realtime-gateway", version: "0.1.0" }));
+      response.end(JSON.stringify({
+        ok: true,
+        service: "aipany-realtime-gateway",
+        version: "0.3.0",
+        speakerIdentityStore: config.speakerIdentity.store,
+        audioFrontEnd: config.audioFrontEnd.enabled,
+        auth: config.server.auth.jwtSecret ? "jwt" : config.server.auth.legacyToken ? "legacy_token" : "development_open",
+      }));
       return;
     }
     response.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
@@ -26,17 +42,24 @@ export function createGatewayServer(config: AppConfig) {
       return;
     }
 
-    if (!authorized(request, url, config.server.token)) {
+    const authContext = authenticateRequest(request, url, config.server.auth);
+    if (!authContext) {
       socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
       socket.destroy();
       return;
     }
+    authContexts.set(request, authContext);
 
     wss.handleUpgrade(request, socket, head, (ws) => wss.emit("connection", ws, request));
   });
 
-  wss.on("connection", (ws) => {
-    const session = new RealtimeSession(ws, config);
+  wss.on("connection", (ws, request) => {
+    const authContext = authContexts.get(request) ?? {
+      authenticated: false,
+      legacy: false,
+      scopes: new Set(["*"]),
+    };
+    const session = new RealtimeSession(ws, config, identityStore, authContext);
     let initialized = false;
 
     ws.on("message", (raw, isBinary) => {
@@ -82,6 +105,49 @@ export function createGatewayServer(config: AppConfig) {
         case "response.cancel":
           session.cancelResponse();
           break;
+        case "mode.set":
+          session.setInteractionMode(event.mode, "manual");
+          break;
+        case "mode.suggestion.respond":
+          session.respondToModeSuggestion(event.suggestionId, event.accepted);
+          break;
+        case "speaker.consent.grant":
+          void session.setSpeakerConsent(true).catch((error) => {
+            sendError(ws, "SPEAKER_CONSENT_FAILED", error instanceof Error ? error.message : String(error));
+          });
+          break;
+        case "speaker.consent.revoke":
+          void session.revokeSpeakerConsent(event.deleteExisting).catch((error) => {
+            sendError(ws, "SPEAKER_CONSENT_FAILED", error instanceof Error ? error.message : String(error));
+          });
+          break;
+        case "speaker.consent.status":
+          void session.sendSpeakerConsentStatus().catch((error) => {
+            sendError(ws, "SPEAKER_CONSENT_FAILED", error instanceof Error ? error.message : String(error));
+          });
+          break;
+        case "speaker.enrollment.start":
+          void session.startSpeakerEnrollment({
+            personName: event.personName,
+            relation: event.relation,
+            isOwner: event.isOwner,
+          }).catch((error) => {
+            sendError(ws, "SPEAKER_ENROLLMENT_FAILED", error instanceof Error ? error.message : String(error));
+          });
+          break;
+        case "speaker.enrollment.cancel":
+          session.cancelSpeakerEnrollment(event.enrollmentId);
+          break;
+        case "speaker.identity.list":
+          void session.listSpeakerIdentities().catch((error) => {
+            sendError(ws, "SPEAKER_IDENTITY_LIST_FAILED", error instanceof Error ? error.message : String(error));
+          });
+          break;
+        case "speaker.identity.delete":
+          void session.deleteSpeakerIdentity(event.personId).catch((error) => {
+            sendError(ws, "SPEAKER_IDENTITY_DELETE_FAILED", error instanceof Error ? error.message : String(error));
+          });
+          break;
         case "session.finish":
           session.close();
           ws.close(1000, "session finished");
@@ -96,14 +162,37 @@ export function createGatewayServer(config: AppConfig) {
     ws.on("error", () => session.close());
   });
 
+  httpServer.on("close", () => {
+    void identityStore.close?.();
+  });
+
   return httpServer;
 }
 
-function authorized(request: IncomingMessage, url: URL, expectedToken?: string): boolean {
-  if (!expectedToken) return true;
-  const auth = request.headers.authorization;
-  if (auth === `Bearer ${expectedToken}`) return true;
-  return url.searchParams.get("token") === expectedToken;
+function createSpeakerIdentityStore(config: AppConfig): SpeakerIdentityStore {
+  if (config.speakerIdentity.store === "memory") {
+    return new InMemorySpeakerIdentityStore();
+  }
+
+  const connectionString = config.speakerIdentity.connectionString;
+  const encryptionKey = config.speakerIdentity.encryptionKey;
+  if (!connectionString || !encryptionKey) {
+    throw new Error("PostgreSQL Speaker Identity Store 缺少 DATABASE_URL 或 SPEAKER_IDENTITY_ENCRYPTION_KEY");
+  }
+
+  const delegate = new KeyringPostgresSpeakerIdentityStore({
+    connectionString,
+    encryptionKey,
+    ssl: config.speakerIdentity.databaseSsl,
+    maxPoolSize: config.speakerIdentity.poolMax,
+    matchCandidateCount: config.speakerIdentity.matchCandidates,
+  });
+  return new PrivacyAwareSpeakerIdentityStore({
+    delegate,
+    connectionString,
+    ssl: config.speakerIdentity.databaseSsl,
+    maxPoolSize: Math.max(2, Math.min(8, config.speakerIdentity.poolMax)),
+  });
 }
 
 function sendError(ws: WebSocket, code: string, message: string): void {

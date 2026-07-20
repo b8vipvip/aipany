@@ -1,86 +1,218 @@
 # Aipany
 
-Aipany 第一版已经切换为**级联实时语音架构**：
+Aipany 是面向 App、ESP32、智能音箱、AI 玩具、机器人和第三方硬件厂商的实时 AI 语音平台。
+
+当前架构：
 
 ```text
-设备持续音频
-   ↓
-千问 qwen3-asr-flash-realtime
-   ↓ 文字 + 用户情绪
-OpenAI 兼容中转站 LLM
-   ↓ 流式 Token
-Aipany Emotion Director
-   ↓ 情绪/语气指令
-千问 qwen3-tts-instruct-flash-realtime
-   ↓ 流式 PCM
-设备连续播放
+Audio Intelligence
+↓
+Social Intelligence
+↓
+Conversation Intelligence
+↓
+Expressive Voice
 ```
 
-这不是“录完一句再请求”的传统一问一答。客户端只建立一次长连接，麦克风持续上行；ASR、LLM、TTS 全部流式工作，并支持用户在 AI 播放过程中随时插话打断。
+## v0.3 完整实时链路
+
+```text
+Device PCM 16k / 1-8ch
+        │
+        ▼
+Aipany Realtime Gateway
+        │
+        ├─ Audio Front-End
+        │  ├─ Beamforming
+        │  ├─ AEC
+        │  ├─ Noise Suppression
+        │  ├─ AGC
+        │  └─ Dereverb
+        │
+        ├──────────────→ Qwen3 Realtime ASR
+        │
+        └─ Raw Analysis Audio
+               ↓
+          Audio Intelligence Service
+          ├─ ECAPA Speaker Embedding
+          ├─ Online Speaker Diarization
+          ├─ SepFormer Speech Separation
+          ├─ Overlap Detection
+          ├─ Target Speaker Extraction
+          ├─ faster-whisper Segment Transcript
+          └─ AudioSet AST Environment Intelligence
+               ↓
+          Identity / Mode Manager
+               ↓
+          Social Conversation Manager
+          ├─ respond
+          ├─ stay_silent
+          └─ intervene
+               ↓
+          OpenAI-compatible Text LLM
+               ↓
+          Emotion Director
+               ↓
+          Qwen Realtime TTS
+               ↓
+          Streaming PCM
+```
+
+客户端只连接 Aipany，不直接绑定 Qwen、OpenAI、SpeechBrain、Whisper 或其它具体模型供应商。
 
 ## 当前能力
 
-- 长连接持续语音会话
-- 千问实时 ASR
-- ASR Partial / Final 转写
-- ASR 基础情绪识别
-- 服务端 VAD
-- OpenAI-compatible 中转站 LLM 流式输出
-- 千问实时 TTS
-- 基于用户情绪的 TTS 语气指令
-- Barge-in：用户插话立即取消 LLM/TTS
-- 统一客户端事件协议
-- 会话上下文裁剪
-- 健康检查与 Docker 部署骨架
+### 实时语音
 
-## 目录
+- WebSocket 长连接；
+- Streaming ASR / LLM / TTS；
+- Server VAD；
+- Barge-in；
+- LLM / TTS Cancel；
+- 客户端播放 Buffer 清空协议；
+- 用户情绪到 TTS 表达指令。
+
+### Audio Intelligence
+
+- ECAPA Speaker Embedding；
+- 轮次内在线 Speaker Diarization；
+- 跨轮次稳定 `speaker_1 / speaker_2 / ...`；
+- 双人重叠语音检测和 SepFormer 分离；
+- Owner Target Speaker Extraction；
+- 多人分说话人 transcript；
+- AudioSet 环境声音分类；
+- 相对 proximity 分类；
+- 多麦 Delay-and-Sum Beamforming；
+- 服务端 AEC / NS / AGC / Dereverb。
+
+### Social Intelligence
+
+- `auto / owner_focus / group`；
+- 自然语言模式切换；
+- 多人场景模式建议；
+- `respond / stay_silent / intervene`；
+- 被叫名/直接提问识别；
+- helpfulness / urgency / novelty；
+- 自然停顿；
+- 最近 AI 插话频率；
+- Environment risk 主动提醒。
+
+### Long-term Speaker Identity
+
+- Person → Voice Profile → 多 Voice Samples；
+- Progressive Enrollment；
+- PostgreSQL + pgvector；
+- AES-256-GCM canonical embedding 加密；
+- tenant/user 隔离；
+- keyed orthogonal pgvector projection；
+- keyring 和在线密钥轮换；
+- Consent 授权/撤销；
+- 删除权；
+- 安全审计日志；
+- 不默认保存原始注册音频。
+
+### IAM
+
+生产环境支持 HS256 JWT：
+
+- `tenant_id`；
+- `sub / user_id`；
+- `scope / scopes`；
+- `iss / aud / exp / nbf`。
+
+Session 中声明的 tenant/user 必须与 JWT claims 一致。
+
+## 仓库结构
 
 ```text
-packages/protocol/             客户端与网关统一协议
-services/realtime-gateway/     级联实时语音核心服务
-  src/providers/               千问 ASR/TTS、中转站 LLM 适配器
-  src/pipeline/                情绪导演、流式文本切片
-  src/session/                 持续会话、上下文、打断控制
-docs/architecture.md           架构与时序
-deploy/docker-compose.yml      第一版部署文件
+packages/
+  protocol/                      Aipany Realtime Protocol
+  audio-intelligence/            Audio/Social Intelligence 领域层
+
+services/
+  realtime-gateway/
+    src/audio/                   Audio Front-End
+    src/auth.ts                  JWT / Legacy Auth
+    src/providers/               ASR / LLM / TTS
+    src/session/                 实时会话编排
+    src/social/                  Social Turn Evaluator
+    src/speaker/                 Utterance Audio Analysis
+    src/tools/                   Key Rotation 工具
+
+  speaker-intelligence/
+    app/audio_engine.py          Speaker/Diarization/Separation/Environment
+
+deploy/
+  docker-compose.yml
+  postgres/init/
+
+docs/
+  DEVELOPMENT_LOG.md
+  SPEAKER_INTELLIGENCE.md
+  SPEAKER_IDENTITY_PERSISTENCE.md
 ```
 
 ## 启动
 
-Node.js 22+：
+要求：Node.js 22+、Docker Compose。
 
 ```bash
 cp .env.example .env
-# 填写 DASHSCOPE_API_KEY、LLM_API_KEY、LLM_BASE_URL、LLM_MODEL
-npm install
-npm run dev
 ```
 
-健康检查：
-
-```bash
-curl http://127.0.0.1:3000/health
-```
-
-WebSocket：
+至少填写：
 
 ```text
-ws://127.0.0.1:3000/v1/realtime
+DASHSCOPE_API_KEY
+LLM_BASE_URL
+LLM_API_KEY
+LLM_MODEL
 ```
 
-生产环境建议通过 Nginx/Caddy 暴露 `wss://`。
+生产部署建议同时配置：
 
-## 客户端协议
+```text
+AIPANY_JWT_SECRET
+SPEAKER_IDENTITY_STORE=postgres
+DATABASE_URL
+SPEAKER_IDENTITY_ENCRYPTION_KEY
+```
 
-连接成功后先发送：
+启动：
+
+```bash
+docker compose --env-file .env -f deploy/docker-compose.yml up -d --build
+```
+
+模型首次使用时会下载到 `speaker-models` Docker Volume。ECAPA 启动时加载；SepFormer、Whisper、AST 按需懒加载。
+
+Gateway：
+
+```text
+GET http://127.0.0.1:3000/health
+WS  ws://127.0.0.1:3000/v1/realtime
+```
+
+生产环境建议通过反向代理暴露 `wss://`。
+
+## 会话启动
 
 ```json
 {
   "type": "session.start",
   "session": {
+    "tenantId": "tenant-001",
     "userId": "user-001",
     "agentId": "default-agent",
     "locale": "zh-CN",
+    "assistantAliases": ["Aipany", "小派"],
+    "interactionMode": "auto",
+    "socialProactivity": 0.45,
+    "inputAudio": {
+      "encoding": "pcm_s16le",
+      "sampleRate": 16000,
+      "channels": 1
+    },
     "device": {
       "deviceId": "mobile-001",
       "productId": "aipany-mobile",
@@ -91,38 +223,95 @@ ws://127.0.0.1:3000/v1/realtime
 }
 ```
 
-收到 `session.ready` 后，持续发送**二进制 PCM 音频帧**：
+多麦设备可以发送交错 PCM，并配置：
 
-```text
-PCM S16LE
-16000 Hz
-Mono
+```json
+{
+  "channels": 4,
+  "beamformingDelaysSamples": [0, 2, -1, 1]
+}
 ```
 
-服务端下行：
+收到 `session.ready` 后持续发送二进制 PCM。
 
-- JSON：`transcript.partial`、`transcript.final`、`response.text.delta`、`response.interrupted` 等控制事件。
-- Binary：AI TTS 的 `PCM S16LE / 24000 Hz / Mono` 音频块。
-
-收到 `response.interrupted` 后，客户端必须立即停止播放并清空尚未播放的音频缓冲，才能实现真正的 Barge-in。
-
-## 情绪链路
-
-千问 ASR 当前可返回基础情绪标签，第一版 Emotion Director 会按用户情绪选择回复的声音方向：
+输出仍为：
 
 ```text
-sad       → 温暖轻柔
-fearful   → 安心稳定
-angry     → 冷静克制
-happy     → 轻快开心
-surprised → 惊喜好奇
-neutral   → 自然亲切
+PCM S16LE / 24000 Hz / Mono
 ```
 
-TTS 默认使用 `qwen3-tts-instruct-flash-realtime`，因为它支持 `instructions`，更适合做拟人化语气控制。模型与声音均可通过环境变量替换。
+收到 `response.interrupted` 后，客户端必须立即停止播放并清空本地播放 Buffer。
 
-## 重要说明
+## 声纹授权
 
-第一版先打通核心实时链路，尚未恢复旧版 Admin、数据库、计费、移动 App 和 ESP32 SDK。后续会在这个新内核上重新建设，而不是把旧的 OpenAI Realtime 专用实现继续叠加进去。
+默认要求授权后才保存/识别长期人物声纹：
 
-架构细节见 `docs/architecture.md`。
+```json
+{ "type": "speaker.consent.grant" }
+```
+
+撤销并删除现有长期身份：
+
+```json
+{
+  "type": "speaker.consent.revoke",
+  "deleteExisting": true
+}
+```
+
+列出人物：
+
+```json
+{ "type": "speaker.identity.list" }
+```
+
+## 密钥轮换
+
+兼容单密钥：
+
+```text
+SPEAKER_IDENTITY_ENCRYPTION_KEY=<32-byte-base64>
+```
+
+Keyring：
+
+```json
+{
+  "active": "v2",
+  "search": "<stable-search-key>",
+  "keys": {
+    "v2": "<new-encryption-key>",
+    "v1": "<old-encryption-key>"
+  }
+}
+```
+
+设置新 active key 后构建 Gateway，然后执行：
+
+```bash
+npm --workspace @aipany/realtime-gateway run speaker:rotate-keys
+```
+
+历史密文重写完成后可以移除不再需要的数据解密 key；`search` key 必须保持稳定。
+
+## 重要工程原则
+
+```text
+Device
+↓
+Aipany Protocol
+↓
+Aipany Gateway
+↓
+Provider Abstraction
+├─ ASR
+├─ LLM
+├─ TTS
+├─ Speaker Intelligence
+├─ Environment Intelligence
+└─ Audio Processing
+```
+
+模型、供应商和部署方式都隐藏在 Aipany Server 后面。App 是一种 Device，ESP32 也是一种 Device。
+
+所有重要架构变更必须同步更新 `docs/DEVELOPMENT_LOG.md`。

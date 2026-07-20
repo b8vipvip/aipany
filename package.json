@@ -1,18 +1,18 @@
 {
   "name": "aipany",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "Aipany 级联实时语音网关：千问实时 ASR + OpenAI 兼容 LLM + 千问实时 TTS",
+  "description": "Aipany Audio Intelligence、Social Intelligence 与实时 AI 语音平台",
   "workspaces": [
     "packages/*",
     "services/*"
   ],
   "scripts": {
-    "build": "npm --workspace @aipany/protocol run build && npm --workspace @aipany/realtime-gateway run build",
-    "dev": "npm --workspace @aipany/protocol run build && npm --workspace @aipany/realtime-gateway run dev",
+    "build": "npm --workspace @aipany/protocol run build && npm --workspace @aipany/audio-intelligence run build && npm --workspace @aipany/realtime-gateway run build",
+    "dev": "npm --workspace @aipany/protocol run build && npm --workspace @aipany/audio-intelligence run build && npm --workspace @aipany/realtime-gateway run dev",
     "start": "npm --workspace @aipany/realtime-gateway run start",
-    "test": "npm --workspace @aipany/protocol run build && npm --workspace @aipany/realtime-gateway run test",
-    "typecheck": "npm --workspace @aipany/protocol run build && npm --workspace @aipany/realtime-gateway run typecheck"
+    "test": "npm --workspace @aipany/protocol run build && npm --workspace @aipany/audio-intelligence run test && npm --workspace @aipany/audio-intelligence run build && npm --workspace @aipany/realtime-gateway run test",
+    "typecheck": "npm --workspace @aipany/protocol run build && npm --workspace @aipany/audio-intelligence run typecheck && npm --workspace @aipany/audio-intelligence run build && npm --workspace @aipany/realtime-gateway run typecheck"
   },
   "engines": {
     "node": ">=22"

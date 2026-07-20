@@ -1,6 +1,6 @@
 {
   "name": "@aipany/realtime-gateway",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
@@ -8,11 +8,13 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
+    "speaker:rotate-keys": "node dist/tools/rotate-speaker-identity-keys.js",
     "test": "node --import tsx --test test/**/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@aipany/protocol": "0.1.0",
+    "@aipany/audio-intelligence": "0.3.0",
+    "@aipany/protocol": "0.3.0",
     "ws": "^8.18.0",
     "zod": "^3.24.2"
   },

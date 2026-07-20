@@ -1,4 +1,37 @@
 services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: aipany
+      POSTGRES_USER: aipany
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aipany-dev-change-me}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aipany -d aipany"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+
+  speaker-intelligence:
+    build:
+      context: ..
+      dockerfile: services/speaker-intelligence/Dockerfile
+    env_file:
+      - ../.env
+    restart: unless-stopped
+    shm_size: "2gb"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3200/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 60s
+      retries: 10
+    volumes:
+      - speaker-models:/models
+
   realtime-gateway:
     build:
       context: ..
@@ -6,5 +39,14 @@ services:
     env_file:
       - ../.env
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      speaker-intelligence:
+        condition: service_healthy
     ports:
       - "127.0.0.1:3000:3000"
+
+volumes:
+  speaker-models:
+  postgres-data:

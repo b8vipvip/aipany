@@ -12,7 +12,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - run: python3 -m compileall -q services/speaker-intelligence/app
       - run: npm install
       - run: npm run typecheck
+      - name: Test keyring encryption
+        run: node --import tsx --test packages/audio-intelligence/test/keyring-encrypted-embedding-codec.test.ts
+      - name: Test gateway auth
+        run: node --import tsx --test services/realtime-gateway/test/auth.test.ts
+      - name: Test audio front-end
+        run: node --import tsx --test services/realtime-gateway/test/streaming-audio-front-end.test.ts
+      - name: Test social turn evaluator
+        run: node --import tsx --test services/realtime-gateway/test/social-turn-evaluator.test.ts
       - run: npm test
       - run: npm run build
