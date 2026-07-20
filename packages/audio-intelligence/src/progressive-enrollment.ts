@@ -1,14 +1,22 @@
 import { randomUUID } from "node:crypto";
-import type { EnrollmentState, SpeakerObservation, VoiceProfile } from "./types.js";
-import { InMemorySpeakerIdentityStore } from "./speaker-identity-store.js";
+import type { EnrollmentState, SpeakerIdentityScope, SpeakerObservation, VoiceProfile } from "./types.js";
+import type { SpeakerIdentityStore } from "./speaker-identity-store.js";
 
 export class ProgressiveVoiceEnrollmentManager {
   private readonly sessions = new Map<string, EnrollmentState>();
 
-  constructor(private readonly store: InMemorySpeakerIdentityStore) {}
+  constructor(
+    private readonly store: SpeakerIdentityStore,
+    private readonly scope: SpeakerIdentityScope,
+  ) {}
 
-  begin(input: { sessionId: string; personName: string; relation?: string; isOwner?: boolean }): EnrollmentState {
-    const person = this.store.createPerson({
+  async begin(input: {
+    sessionId: string;
+    personName: string;
+    relation?: string;
+    isOwner?: boolean;
+  }): Promise<EnrollmentState> {
+    const person = await this.store.createPerson(this.scope, {
       name: input.personName,
       relation: input.relation,
       isOwner: input.isOwner,
@@ -34,7 +42,10 @@ export class ProgressiveVoiceEnrollmentManager {
     return state ? structuredClone(state) : undefined;
   }
 
-  ingest(enrollmentId: string, observation: SpeakerObservation): { state: EnrollmentState; profile?: VoiceProfile } {
+  async ingest(
+    enrollmentId: string,
+    observation: SpeakerObservation,
+  ): Promise<{ state: EnrollmentState; profile?: VoiceProfile }> {
     const state = this.sessions.get(enrollmentId);
     if (!state) throw new Error(`声纹注册会话不存在：${enrollmentId}`);
     if (state.status !== "collecting") return { state: structuredClone(state) };
@@ -51,7 +62,7 @@ export class ProgressiveVoiceEnrollmentManager {
       return { state: structuredClone(state) };
     }
 
-    const profile = this.store.addVoiceSample({
+    const profile = await this.store.addVoiceSample(this.scope, {
       personId: state.personId,
       embedding: observation.embedding,
       sourceSessionId: state.sessionId,
