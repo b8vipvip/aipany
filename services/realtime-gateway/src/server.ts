@@ -9,7 +9,7 @@ export function createGatewayServer(config: AppConfig) {
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
     if (request.method === "GET" && url.pathname === "/health") {
       response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      response.end(JSON.stringify({ ok: true, service: "aipany-realtime-gateway", version: "0.1.0" }));
+      response.end(JSON.stringify({ ok: true, service: "aipany-realtime-gateway", version: "0.2.0" }));
       return;
     }
     response.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
@@ -81,6 +81,22 @@ export function createGatewayServer(config: AppConfig) {
           break;
         case "response.cancel":
           session.cancelResponse();
+          break;
+        case "mode.set":
+          session.setInteractionMode(event.mode, "manual");
+          break;
+        case "mode.suggestion.respond":
+          session.respondToModeSuggestion(event.suggestionId, event.accepted);
+          break;
+        case "speaker.enrollment.start":
+          session.startSpeakerEnrollment({
+            personName: event.personName,
+            relation: event.relation,
+            isOwner: event.isOwner,
+          });
+          break;
+        case "speaker.enrollment.cancel":
+          session.cancelSpeakerEnrollment(event.enrollmentId);
           break;
         case "session.finish":
           session.close();
