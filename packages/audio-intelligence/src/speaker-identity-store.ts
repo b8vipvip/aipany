@@ -24,6 +24,14 @@ export interface AddVoiceSampleInput {
   quality?: number;
 }
 
+export interface SpeakerConsentState {
+  granted: boolean;
+  grantedAt?: number;
+  revokedAt?: number;
+  updatedAt: number;
+  actorId?: string;
+}
+
 export type MaybePromise<T> = T | Promise<T>;
 
 export interface SpeakerIdentityStore {
@@ -37,6 +45,9 @@ export interface SpeakerIdentityStore {
   addVoiceSample(scope: SpeakerIdentityScope, input: AddVoiceSampleInput): MaybePromise<VoiceProfile>;
   identify(scope: SpeakerIdentityScope, embedding: number[]): MaybePromise<SpeakerMatch>;
   deletePerson(scope: SpeakerIdentityScope, personId: string): MaybePromise<boolean>;
+  deleteAllPeople(scope: SpeakerIdentityScope): MaybePromise<number>;
+  getConsent(scope: SpeakerIdentityScope): MaybePromise<SpeakerConsentState>;
+  setConsent(scope: SpeakerIdentityScope, granted: boolean, actorId?: string): MaybePromise<SpeakerConsentState>;
   close?(): MaybePromise<void>;
 }
 
@@ -60,6 +71,7 @@ export function resolveSpeakerIdentityStoreOptions(
 export class InMemorySpeakerIdentityStore implements SpeakerIdentityStore {
   private readonly people = new Map<string, PersonRecord>();
   private readonly profiles = new Map<string, VoiceProfile>();
+  private readonly consents = new Map<string, SpeakerConsentState>();
   private readonly options: ResolvedSpeakerIdentityStoreOptions;
 
   constructor(options: SpeakerIdentityStoreOptions = {}) {
@@ -167,6 +179,37 @@ export class InMemorySpeakerIdentityStore implements SpeakerIdentityStore {
     if (!person || !belongsToScope(person, scope)) return false;
     if (person.voiceProfileId) this.profiles.delete(person.voiceProfileId);
     return this.people.delete(personId);
+  }
+
+  deleteAllPeople(scope: SpeakerIdentityScope): number {
+    const ids = [...this.people.values()]
+      .filter((person) => belongsToScope(person, scope))
+      .map((person) => person.id);
+    for (const id of ids) this.deletePerson(scope, id);
+    return ids.length;
+  }
+
+  getConsent(scope: SpeakerIdentityScope): SpeakerConsentState {
+    validateScope(scope);
+    return structuredClone(this.consents.get(scopeKey(scope)) ?? {
+      granted: false,
+      updatedAt: 0,
+    });
+  }
+
+  setConsent(scope: SpeakerIdentityScope, granted: boolean, actorId?: string): SpeakerConsentState {
+    validateScope(scope);
+    const now = Date.now();
+    const previous = this.consents.get(scopeKey(scope));
+    const state: SpeakerConsentState = {
+      granted,
+      grantedAt: granted ? now : previous?.grantedAt,
+      revokedAt: granted ? undefined : now,
+      updatedAt: now,
+      actorId,
+    };
+    this.consents.set(scopeKey(scope), state);
+    return structuredClone(state);
   }
 }
 
@@ -281,4 +324,8 @@ export function clamp(value: number, min: number, max: number): number {
 
 function belongsToScope(person: PersonRecord, scope: SpeakerIdentityScope): boolean {
   return person.tenantId === scope.tenantId && person.userId === scope.userId;
+}
+
+function scopeKey(scope: SpeakerIdentityScope): string {
+  return `${scope.tenantId}\u0000${scope.userId}`;
 }
