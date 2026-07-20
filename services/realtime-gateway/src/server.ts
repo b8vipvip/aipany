@@ -21,7 +21,7 @@ export function createGatewayServer(config: AppConfig) {
       response.end(JSON.stringify({
         ok: true,
         service: "aipany-realtime-gateway",
-        version: "0.3.0",
+        version: "0.4.0",
         speakerIdentityStore: config.speakerIdentity.store,
         audioFrontEnd: config.audioFrontEnd.enabled,
         auth: config.server.auth.jwtSecret ? "jwt" : config.server.auth.legacyToken ? "legacy_token" : "development_open",

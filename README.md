@@ -1,146 +1,122 @@
-# Aipany
+# Aipany v0.4
 
-Aipany 是面向 App、ESP32、智能音箱、AI 玩具、机器人和第三方硬件厂商的实时 AI 语音平台。
+Aipany 是面向 App、智能硬件和实时语音产品的 Social Voice / Audio Intelligence 平台。
 
-当前架构：
-
-```text
-Audio Intelligence
-↓
-Social Intelligence
-↓
-Conversation Intelligence
-↓
-Expressive Voice
-```
-
-## v0.3 完整实时链路
+v0.4 将重型 Audio Intelligence 从“必须和 Gateway 部署在同一台机器”升级为混合计算架构：
 
 ```text
-Device PCM 16k / 1-8ch
-        │
-        ▼
-Aipany Realtime Gateway
-        │
-        ├─ Audio Front-End
-        │  ├─ Beamforming
-        │  ├─ AEC
-        │  ├─ Noise Suppression
-        │  ├─ AGC
-        │  └─ Dereverb
-        │
-        ├──────────────→ Qwen3 Realtime ASR
-        │
-        └─ Raw Analysis Audio
-               ↓
-          Audio Intelligence Service
-          ├─ ECAPA Speaker Embedding
-          ├─ Online Speaker Diarization
-          ├─ SepFormer Speech Separation
-          ├─ Overlap Detection
-          ├─ Target Speaker Extraction
-          ├─ faster-whisper Segment Transcript
-          └─ AudioSet AST Environment Intelligence
-               ↓
-          Identity / Mode Manager
-               ↓
-          Social Conversation Manager
-          ├─ respond
-          ├─ stay_silent
-          └─ intervene
-               ↓
-          OpenAI-compatible Text LLM
-               ↓
-          Emotion Director
-               ↓
-          Qwen Realtime TTS
-               ↓
-          Streaming PCM
+                    Aipany Audio Intelligence
+                              │
+          ┌───────────────────┼───────────────────┐
+          │                   │                   │
+    Local Realtime       Cloud Intelligence    Remote GPU
+          │                   │                   │
+     ECAPA 声纹           Qwen Omni            SepFormer
+     基础 Diarization     Environment           Speech Separation
+     Speaker Tracking     Audio Events          Target Speaker
+     AEC / NS / AGC       Diarized Transcript   Extraction
+          │                   │                   │
+          └───────────────────┴───────────────────┘
+                              ↓
+                    Social Conversation Manager
+                              ↓
+                         LLM / Realtime TTS
 ```
 
-客户端只连接 Aipany，不直接绑定 Qwen、OpenAI、SpeechBrain、Whisper 或其它具体模型供应商。
+## 核心能力
 
-## 当前能力
+### Realtime Voice
 
-### 实时语音
-
-- WebSocket 长连接；
-- Streaming ASR / LLM / TTS；
+- Qwen Realtime ASR；
+- OpenAI-compatible LLM；
+- Qwen Realtime TTS；
 - Server VAD；
 - Barge-in；
-- LLM / TTS Cancel；
-- 客户端播放 Buffer 清空协议；
-- 用户情绪到 TTS 表达指令。
+- Streaming Audio Front-End；
+- AEC / Noise Suppression / AGC / Dereverb；
+- 1–8 声道输入和基础 Beamforming。
 
-### Audio Intelligence
+### Local Realtime Audio Intelligence
 
-- ECAPA Speaker Embedding；
-- 轮次内在线 Speaker Diarization；
-- 跨轮次稳定 `speaker_1 / speaker_2 / ...`；
-- 双人重叠语音检测和 SepFormer 分离；
-- Owner Target Speaker Extraction；
-- 多人分说话人 transcript；
-- AudioSet 环境声音分类；
-- 相对 proximity 分类；
-- 多麦 Delay-and-Sum Beamforming；
-- 服务端 AEC / NS / AGC / Dereverb。
-
-### Social Intelligence
-
-- `auto / owner_focus / group`；
-- 自然语言模式切换；
-- 多人场景模式建议；
-- `respond / stay_silent / intervene`；
-- 被叫名/直接提问识别；
-- helpfulness / urgency / novelty；
-- 自然停顿；
-- 最近 AI 插话频率；
-- Environment risk 主动提醒。
-
-### Long-term Speaker Identity
-
-- Person → Voice Profile → 多 Voice Samples；
-- Progressive Enrollment；
+- SpeechBrain ECAPA Speaker Embedding；
+- Session Speaker Tracking；
+- 基础 Diarization；
+- Person / Owner 长期声纹身份；
 - PostgreSQL + pgvector；
-- AES-256-GCM canonical embedding 加密；
-- tenant/user 隔离；
-- keyed orthogonal pgvector projection；
-- keyring 和在线密钥轮换；
-- Consent 授权/撤销；
-- 删除权；
-- 安全审计日志；
-- 不默认保存原始注册音频。
+- AES-256-GCM Keyring；
+- Speaker Consent / Delete / Audit。
 
-### IAM
+### Cloud Intelligence
 
-生产环境支持 HS256 JWT：
+`QwenOmniCloudAudioProvider` 负责按需增强：
 
-- `tenant_id`；
-- `sub / user_id`；
-- `scope / scopes`；
-- `iss / aud / exp / nbf`。
+- Environment Understanding；
+- Audio Event Understanding；
+- Cloud Diarized Transcription。
 
-Session 中声明的 tenant/user 必须与 JWT claims 一致。
+Cloud transcript 会按时间区间合并到本地 diarization segment，因此本地 Speaker Embedding 和长期身份匹配不会丢失。
+
+### Remote GPU
+
+`HttpRemoteTargetSpeakerProvider` 复用 Aipany `/v1/analyze` 协议。
+
+可以把 SepFormer Worker 部署到任意 GPU 环境：
+
+- 腾讯云 GPU / Serverless GPU；
+- 阿里云 GPU；
+- 独立 GPU 服务器；
+- 其他可访问的兼容服务。
+
+支持触发策略：
+
+```text
+overlap_only
+overlap_or_multi_speaker
+always_owner_focus
+```
+
+默认使用 `overlap_or_multi_speaker`。
+
+## 低配服务器推荐架构
+
+对于约 4 vCPU / 4 GB RAM / 无 GPU 的 Ubuntu 服务器：
+
+```text
+本地：
+Gateway
+PostgreSQL + pgvector
+ECAPA
+基础 Diarization
+AEC / NS / AGC
+Social Conversation Manager
+
+云端：
+Qwen Omni Environment
+Cloud Diarized Transcription
+
+远程 GPU：
+SepFormer
+Target Speaker Extraction
+```
+
+这样核心服务不需要本机 GPU，也不需要常驻加载 Whisper、AST 和 SepFormer。
 
 ## 仓库结构
 
 ```text
 packages/
-  protocol/                      Aipany Realtime Protocol
-  audio-intelligence/            Audio/Social Intelligence 领域层
+  protocol/                       Aipany Realtime Protocol
+  audio-intelligence/
+    src/providers/
+      http-speaker-intelligence-provider.ts
+      auto-hybrid-speaker-intelligence-provider.ts
+      hybrid-audio-intelligence-provider.ts
+      qwen-omni-cloud-audio-provider.ts
+      http-remote-target-speaker-provider.ts
 
 services/
-  realtime-gateway/
-    src/audio/                   Audio Front-End
-    src/auth.ts                  JWT / Legacy Auth
-    src/providers/               ASR / LLM / TTS
-    src/session/                 实时会话编排
-    src/social/                  Social Turn Evaluator
-    src/speaker/                 Utterance Audio Analysis
-    src/tools/                   Key Rotation 工具
-
-  speaker-intelligence/
-    app/audio_engine.py          Speaker/Diarization/Separation/Environment
+  realtime-gateway/               实时会话编排
+  speaker-intelligence/           本地 ECAPA / Diarization / 可选重模型
 
 deploy/
   docker-compose.yml
@@ -152,9 +128,14 @@ docs/
   SPEAKER_IDENTITY_PERSISTENCE.md
 ```
 
-## 启动
+## 启动要求
 
-要求：Node.js 22+、Docker Compose。
+- Node.js 22+；
+- Docker Compose；
+- 阿里云百炼 API Key；
+- 一个 OpenAI-compatible LLM API。
+
+复制环境变量：
 
 ```bash
 cp .env.example .env
@@ -169,22 +150,91 @@ LLM_API_KEY
 LLM_MODEL
 ```
 
-生产部署建议同时配置：
+生产环境建议同时配置：
 
 ```text
 AIPANY_JWT_SECRET
 SPEAKER_IDENTITY_STORE=postgres
 DATABASE_URL
+POSTGRES_PASSWORD
 SPEAKER_IDENTITY_ENCRYPTION_KEY
 ```
 
-启动：
+## v0.4 Cloud Intelligence
+
+默认 `.env.example` 使用：
+
+```text
+CLOUD_AUDIO_INTELLIGENCE_ENABLED=true
+CLOUD_AUDIO_ENVIRONMENT_ENABLED=true
+CLOUD_AUDIO_DIARIZED_TRANSCRIPTION_ENABLED=true
+QWEN_OMNI_MODEL=qwen3.5-omni-flash
+```
+
+`QWEN_OMNI_API_KEY` 留空时复用：
+
+```text
+DASHSCOPE_API_KEY
+```
+
+如果配置了：
+
+```text
+DASHSCOPE_WORKSPACE_ID
+```
+
+Qwen Omni 会自动使用北京地域 Workspace 专属 OpenAI-compatible 地址；也可以通过 `QWEN_OMNI_BASE_URL` 显式覆盖。
+
+## v0.4 Local Heavy Models
+
+低配服务器推荐：
+
+```text
+SPEECH_SEPARATION_ENABLED=false
+SEGMENT_TRANSCRIPTION_ENABLED=false
+ENVIRONMENT_INTELLIGENCE_ENABLED=false
+TARGET_SPEAKER_EXTRACTION_ENABLED=false
+```
+
+注意 Gateway 的能力请求开关仍可以保持：
+
+```text
+AUDIO_SEPARATION_ENABLED=true
+AUDIO_ENVIRONMENT_ENABLED=true
+AUDIO_SEGMENT_TRANSCRIPTION_ENABLED=true
+```
+
+这表示系统仍然需要这些能力，但由 Cloud / Remote Provider 提供，而不是本机模型提供。
+
+## Remote SepFormer
+
+准备好 GPU Worker 后配置：
+
+```text
+REMOTE_SEPARATION_ENABLED=true
+REMOTE_SEPARATION_BASE_URL=https://your-gpu-worker.example.com
+REMOTE_SEPARATION_TOKEN=your-token
+REMOTE_SEPARATION_TIMEOUT_MS=30000
+REMOTE_SEPARATION_TRIGGER=overlap_or_multi_speaker
+```
+
+远端服务需要兼容 Aipany Audio Intelligence：
+
+```text
+GET  /health
+GET  /v1/capabilities
+POST /v1/analyze
+```
+
+现有 `services/speaker-intelligence` 可以直接作为远程 GPU Worker 镜像使用，只需要在 GPU 环境启用 SepFormer。
+
+## Docker Compose 启动
 
 ```bash
 docker compose --env-file .env -f deploy/docker-compose.yml up -d --build
 ```
 
-模型首次使用时会下载到 `speaker-models` Docker Volume。ECAPA 启动时加载；SepFormer、Whisper、AST 按需懒加载。
+模型首次运行会下载到 Docker Volume。v0.4 低配模式下本地主要加载 ECAPA；SepFormer、Whisper、AST 可以保持关闭。
 
 Gateway：
 
@@ -193,7 +243,12 @@ GET http://127.0.0.1:3000/health
 WS  ws://127.0.0.1:3000/v1/realtime
 ```
 
-生产环境建议通过反向代理暴露 `wss://`。
+生产环境建议通过 Nginx / 宝塔反向代理暴露：
+
+```text
+https://your-domain/health
+wss://your-domain/v1/realtime
+```
 
 ## 会话启动
 
@@ -223,28 +278,19 @@ WS  ws://127.0.0.1:3000/v1/realtime
 }
 ```
 
-多麦设备可以发送交错 PCM，并配置：
-
-```json
-{
-  "channels": 4,
-  "beamformingDelaysSamples": [0, 2, -1, 1]
-}
-```
-
 收到 `session.ready` 后持续发送二进制 PCM。
 
-输出仍为：
+输出：
 
 ```text
 PCM S16LE / 24000 Hz / Mono
 ```
 
-收到 `response.interrupted` 后，客户端必须立即停止播放并清空本地播放 Buffer。
+收到 `response.interrupted` 后客户端必须立即停止播放并清空本地播放 Buffer。
 
 ## 声纹授权
 
-默认要求授权后才保存/识别长期人物声纹：
+默认要求用户授权后才进行长期人物身份学习：
 
 ```json
 { "type": "speaker.consent.grant" }
@@ -259,59 +305,15 @@ PCM S16LE / 24000 Hz / Mono
 }
 ```
 
-列出人物：
-
-```json
-{ "type": "speaker.identity.list" }
-```
-
-## 密钥轮换
-
-兼容单密钥：
+## 设计原则
 
 ```text
-SPEAKER_IDENTITY_ENCRYPTION_KEY=<32-byte-base64>
+Cloud Intelligence 失败
+Remote GPU 失败
+Local Enhancement 失败
+
+都不能阻断：
+ASR → LLM → TTS
 ```
 
-Keyring：
-
-```json
-{
-  "active": "v2",
-  "search": "<stable-search-key>",
-  "keys": {
-    "v2": "<new-encryption-key>",
-    "v1": "<old-encryption-key>"
-  }
-}
-```
-
-设置新 active key 后构建 Gateway，然后执行：
-
-```bash
-npm --workspace @aipany/realtime-gateway run speaker:rotate-keys
-```
-
-历史密文重写完成后可以移除不再需要的数据解密 key；`search` key 必须保持稳定。
-
-## 重要工程原则
-
-```text
-Device
-↓
-Aipany Protocol
-↓
-Aipany Gateway
-↓
-Provider Abstraction
-├─ ASR
-├─ LLM
-├─ TTS
-├─ Speaker Intelligence
-├─ Environment Intelligence
-└─ Audio Processing
-```
-
-模型、供应商和部署方式都隐藏在 Aipany Server 后面。App 是一种 Device，ESP32 也是一种 Device。
-
-所有重要架构变更必须同步更新 `docs/DEVELOPMENT_LOG.md`。
+Aipany 的设备协议和 Realtime Session 不绑定具体云厂商。Cloud / GPU Provider 可以持续替换，而不会要求客户端跟着修改协议。

@@ -2,344 +2,349 @@
 
 > 本文档用于记录每次新增的重要业务逻辑、框架、协议和架构决策。后续功能开发必须同步更新本文件，避免只改代码不留下设计上下文。
 
-## 2026-07-20 · v0.3 Complete Social Voice Architecture
+## 2026-07-20 · v0.4 Hybrid Cloud Audio Intelligence
 
 ### 本次目标
 
-完成 v0.2.x 架构中尚未落地的核心能力，使 Aipany 从“单轮声纹增强的实时语音链路”升级为可实际运行的完整 Social Voice Architecture：
+将 v0.3 中需要在单台服务器本地运行的重型 Audio Intelligence 模型拆分为三层：
 
 ```text
-Raw / Multi-channel PCM
-        │
-        ├─────────────── 原始分析支路 ───────────────────────┐
-        │                                                    │
-        ▼                                                    ▼
-Audio Front-End                                      Audio Intelligence Service
-Beamforming                                          ├─ Speaker Embedding
-AEC                                                  ├─ Online Diarization
-Noise Suppression                                    ├─ Overlap Detection
-AGC                                                  ├─ Speech Separation
-Dereverb                                             ├─ Target Speaker Extraction
-        │                                            ├─ Segment Transcription
-        ▼                                            └─ Environment Intelligence
-Qwen Realtime ASR                                             │
-        │                                                     │
-        └──────────────────────┬──────────────────────────────┘
-                               ▼
-                      Identity + Mode Manager
-                               ▼
-                    Social Conversation Manager
-                  respond / stay_silent / intervene
-                               ▼
-                      Conversation Brain (LLM)
-                               ▼
-                        Emotion Director
-                               ▼
-                      Expressive Realtime TTS
+                    Aipany Audio Intelligence
+                              │
+          ┌───────────────────┼───────────────────┐
+          │                   │                   │
+    Local Realtime       Cloud Intelligence    Remote GPU
+          │                   │                   │
+     ECAPA 声纹           Qwen Omni            SepFormer
+     基础 Diarization     Environment           Speech Separation
+     Overlap Hints        Audio Event           Target Speaker
+     AEC / NS / AGC       Understanding         Extraction
+          │                   │
+          │                   └─ Cloud Diarized Transcription
+          │
+          └─────────────── Hybrid Merge ───────────────┘
+                              │
+                       Realtime Session
 ```
 
-### 1. 轮次内在线 Speaker Diarization
+目标不是删除 v0.3 能力，而是让能力可以根据部署资源被放置到最合理的计算位置。
 
-`services/speaker-intelligence/app/audio_engine.py` 新增基于 ECAPA embedding 的在线说话人分段：
-
-1. 从 VAD 轮次中检测有效语音区域；
-2. 使用滑动时间窗提取 Speaker Embedding；
-3. 在线聚类为 `speaker_1 / speaker_2 / ...`；
-4. Gateway 再通过 `SessionSpeakerTracker` 将轮次内标签映射到跨轮次稳定 Session Speaker ID；
-5. 每个分段可以携带自己的 embedding 和 transcript。
-
-这使多人模式不再只能给“一整个 VAD 轮次”分配一个说话人。
-
-### 2. Overlap Detection + Speech Separation
-
-新增可选 SepFormer 分离链路：
-
-```text
-Mixed Audio
-↓
-SepFormer
-↓
-Source A / Source B
-↓
-Energy Validation
-+
-Per-source Speaker Embedding
-↓
-Overlap Detection
-```
-
-如果第二音源具有足够能量，并且两个音源的 Speaker Embedding 明显不同，则将该轮标记为重叠讲话。
-
-增强模型采用懒加载。SepFormer 加载或推理失败时，系统自动降级到普通 diarization，不阻断实时 ASR / LLM / TTS。
-
-### 3. Target Speaker Extraction
-
-专注模式现在支持目标主人提取：
-
-```text
-混合多人声音
-+
-已确认 Owner Voice Profile centroid
-↓
-Speech Separation
-↓
-逐音轨 Speaker Similarity
-↓
-选择最接近 Owner 的音轨
-↓
-独立转写 Owner Audio
-```
-
-当检测到重叠讲话，并且目标主人匹配达到置信阈值时，Conversation Brain 使用主人音轨的独立 transcript，而不是混合 ASR transcript。
-
-如果无法可靠提取主人，系统采用保守策略过滤该轮，避免把旁人的混合内容误认为主人指令。
-
-### 4. Group Conversation Transcript
-
-Realtime Protocol 新增：
-
-```text
-transcript.group
-```
-
-每个 segment 包含：
-
-- `startMs / endMs`
-- `speaker`
-- `text`
-- `overlap`
-- `confidence`
-
-多人模式进入 LLM 的上下文可以变成：
-
-```text
-[主人] 明天八点出发吧
-[小王] 会不会太早
-[小李] 机场比较远
-```
-
-如果人物身份未知，则保留稳定的 `speaker_n` 标签。
-
-### 5. Social Conversation Manager 完整实时接入
-
-此前 Social Manager 只有领域规则，本版本已经接入真实会话状态。
-
-实时输入信号包括：
-
-- 是否明确叫到 Aipany；
-- 是否直接向 AI 提问；
-- 当前是否存在人类重叠讲话；
-- 自然停顿长度；
-- 当前内容的 helpfulness / urgency / novelty；
-- 最近 AI 主动插话频率；
-- 距离 AI 上一次发言的时间；
-- 用户配置的 `socialProactivity`；
-- Environment Intelligence 的安全风险事件。
-
-输出：
-
-```text
-respond
-stay_silent
-intervene
-```
-
-新增 `social.decision` 协议事件，方便客户端和调试系统观察场控决策。
-
-高置信度安全风险允许在自然停顿后触发 `urgent_intervention`，但不会在人类仍重叠讲话时抢话。
-
-### 6. Environment Intelligence
-
-Audio Intelligence Service 新增 AudioSet AST 环境声音分类，默认模型：
-
-```text
-MIT/ast-finetuned-audioset-10-10-0.4593
-```
-
-输出：
-
-- scene；
-- scene confidence；
-- noise level；
-- top environment events。
-
-AST 不可用时自动降级到基于音频能量的环境估计。
-
-环境结果通过：
-
-```text
-environment.updated
-```
-
-下发，并作为概率上下文提供给 Conversation Brain。低置信度环境事件不能被当作确定事实；只有高风险事件可以影响主动插话。
-
-### 7. Streaming Audio Front-End
-
-Gateway 新增：
-
-```text
-StreamingAudioFrontEnd
-```
-
-服务端基础链路包括：
-
-- Delay-and-Sum 多麦 Beamforming；
-- AEC：使用服务器实际播放的 TTS PCM 作为 far-end reference；
-- Noise Suppression；
-- AGC；
-- 轻量 Dereverb；
-- Soft Limiter。
-
-严格保留双支路：
-
-```text
-Beamformed Raw Audio
-├─ 原始支路 → Speaker / Environment Intelligence
-└─ 增强支路 → AEC / NS / AGC / Dereverb → ASR
-```
-
-客户端协议允许声明 1-8 声道 PCM，并可以提供每个麦克风的 `beamformingDelaysSamples`。
-
-说明：服务端实现是通用可运行的基础 DSP，不宣称替代设备侧 WebRTC APM 或专业阵列 DSP。支持这些能力的 App / 硬件仍应优先在本地做低延迟前处理。
-
-### 8. 多租户 IAM
-
-新增 HS256 JWT 鉴权：
-
-- `tenant_id` 绑定 Tenant；
-- `sub / user_id` 绑定 User；
-- `scope / scopes` 控制 `realtime`、`speaker:read`、`speaker:write`；
-- 支持 `iss / aud / exp / nbf` 校验；
-- `session.start` 中客户端声明的 tenant/user 必须和 JWT claims 一致。
-
-旧 `AIPANY_GATEWAY_TOKEN` 继续作为兼容模式。
-
-### 9. 声纹授权、撤销和审计
-
-新增协议：
-
-```text
-speaker.consent.grant
-speaker.consent.revoke
-speaker.consent.status
-speaker.identity.list
-```
-
-默认 `SPEAKER_CONSENT_REQUIRED=true`。
-
-未授权时：
-
-- 可以继续普通实时对话；
-- 可以继续匿名 Session Speaker 跟踪和多人模式建议；
-- 不进行长期人物身份匹配；
-- 不允许开始长期声纹 Enrollment。
-
-撤销授权时可以选择立即删除当前用户全部 Person / Voice Profile / Voice Samples。
-
-PostgreSQL 新增：
-
-```text
-speaker_consents
-speaker_audit_log
-```
-
-审计只记录操作元数据，不记录原始音频和 embedding。
-
-### 10. Speaker Identity Keyring 与密钥轮换
-
-v0.3 新增 `KeyringPostgresSpeakerIdentityStore`。
-
-密文格式升级到 v2：
-
-```text
-version
-+
-key id
-+
-AES-256-GCM iv
-+
-auth tag
-+
-ciphertext
-```
-
-能力：
-
-- active key 负责所有新写入；
-- keyring 中历史 key 继续解密旧数据；
-- v0.2 legacy v1 单密钥密文仍可读取；
-- pgvector search key 与数据加密 key 独立；
-- 更换 active encryption key 不改变搜索投影空间。
-
-提供：
-
-```bash
-npm --workspace @aipany/realtime-gateway run speaker:rotate-keys
-```
-
-用于把历史 Profile / Samples 在线重加密到 active key。
-
-### 11. 新增/升级协议
+### 1. Hybrid Audio Intelligence Provider
 
 新增：
 
 ```text
-transcript.group
-environment.updated
-social.decision
-speaker.target.extracted
-audio.frontend.metrics
-speaker.consent.*
-speaker.identity.list
+HybridAudioIntelligenceProvider
 ```
 
-`session.start` 新增：
+职责：
 
-- `assistantAliases`
-- `inputAudio.channels`
-- `inputAudio.beamformingDelaysSamples`
+1. Local Provider 负责低延迟 Speaker Embedding、基础 Diarization、Proximity 和本地 overlap hints；
+2. Cloud Provider 按需补充 Environment Intelligence 和 Diarized Transcription；
+3. Remote GPU Provider 按策略调用 SepFormer Target Speaker Extraction；
+4. 云端 transcript 按时间重叠区间合并回本地 diarization segment；
+5. 本地 segment embedding 必须保留，以便继续执行长期 Person / Owner Identity 匹配；
+6. 任一 Cloud / Remote 增强调用失败都 fail-open，返回已有本地结果。
 
-### 12. 容错原则
-
-完整架构继续遵守：
+核心原则：
 
 ```text
 增强能力失败
 ≠
-核心语音链路失败
+Realtime Voice 主链路失败
 ```
 
-- Speaker Embedding 失败：继续 ASR / LLM / TTS；
-- Diarization 失败：退回单轮 Speaker Embedding；
-- SepFormer 失败：退回普通 diarization；
-- AST 失败：退回轻量 Environment 估计；
-- Whisper segment transcription 失败：退回 Qwen 主 transcript；
-- Audio Front-End 单帧异常：记录错误并继续音频输入。
+### 2. Gateway 默认入口保持向后兼容
 
-### 13. 验证
-
-新增测试覆盖：
-
-- 多麦波束合成；
-- AGC；
-- AEC reference；
-- Social Turn signals；
-- Environment urgency；
-- JWT tenant/user 绑定和 scope；
-- Keyring v2 加密；
-- legacy v1 解密；
-- 稳定 search projection；
-- AAD 防跨作用域解密。
-
-CI 现在执行：
+v0.3 Gateway 仍然通过：
 
 ```text
-python3 -m compileall services/speaker-intelligence/app
-npm install
-npm run typecheck
-npm test
-npm run build
+HttpSpeakerIntelligenceProvider
 ```
+
+创建 Audio Intelligence Provider。
+
+v0.4 在包根导出层将该名称映射到：
+
+```text
+AutoHybridSpeakerIntelligenceProvider
+```
+
+因此现有 `RealtimeSession` 不需要重写，旧构造参数仍然兼容。
+
+自动混合入口根据环境变量决定是否组装：
+
+```text
+Local HTTP Provider
++
+Qwen Omni Cloud Provider
++
+Remote Target Speaker Provider
+```
+
+Cloud / Remote 全部关闭时，行为等价于 v0.3 本地 HTTP Provider。
+
+### 3. Qwen Omni Cloud Audio Provider
+
+新增：
+
+```text
+QwenOmniCloudAudioProvider
+```
+
+采用阿里云百炼 Qwen-Omni OpenAI-compatible Chat API。
+
+输入：
+
+```text
+PCM utterance
+↓
+WAV container
+↓
+Base64 input_audio
+```
+
+输出统一解析为：
+
+```json
+{
+  "environment": {
+    "scene": "street",
+    "sceneConfidence": 0.9,
+    "noiseLevel": "medium",
+    "events": []
+  },
+  "segments": [
+    {
+      "speakerId": "speaker_1",
+      "startMs": 0,
+      "endMs": 1200,
+      "confidence": 0.9,
+      "overlap": false,
+      "transcript": "..."
+    }
+  ]
+}
+```
+
+Provider 使用 SSE streaming 响应并只收集文本 delta。
+
+Cloud Intelligence 是非实时增强支路，不替代 Qwen Realtime ASR；普通单人聊天的主 transcript 仍来自低延迟实时 ASR。
+
+### 4. Cloud Diarized Transcription 合并策略
+
+云端说话人标签不能直接替代本地身份标签，因为云端通常没有 Aipany 长期 Voice Profile embedding。
+
+因此采用：
+
+```text
+Local Diarization
+speaker + embedding + time range
+             │
+             ├──── Time-overlap alignment ────┐
+             │                                │
+Cloud Diarized Transcript                     │
+cloud speaker + transcript + time range       │
+             │                                │
+             └────────────────────────────────┘
+                              ↓
+Local stable speaker ID
++
+Local embedding
++
+Cloud transcript
+```
+
+这样 `SessionSpeakerTracker`、Owner Voice Profile、Person Identity 和 Group Transcript 都继续工作。
+
+### 5. Remote GPU SepFormer
+
+新增：
+
+```text
+HttpRemoteTargetSpeakerProvider
+```
+
+不新增专有远程协议，而是复用现有：
+
+```text
+POST /v1/analyze
+```
+
+远端只要部署兼容 Aipany Audio Intelligence API 的 GPU Worker，即可运行 SepFormer。
+
+这意味着 Remote GPU 可以部署在：
+
+- 腾讯云 GPU / Serverless GPU；
+- 阿里云 GPU；
+- 独立 GPU 服务器；
+- 其他兼容 HTTP 网络环境。
+
+Gateway 不关心底层 GPU 厂商。
+
+### 6. Remote Separation Trigger
+
+支持三种远程 GPU 触发策略：
+
+```text
+overlap_only
+overlap_or_multi_speaker
+always_owner_focus
+```
+
+默认：
+
+```text
+overlap_or_multi_speaker
+```
+
+理由：关闭本地 SepFormer 后，本地精确 overlap detection 能力会降低，因此当一个 VAD utterance 内基础 Diarization 已出现多个说话人时，也允许触发 Remote GPU。
+
+对于噪声复杂、Owner Focus 要求非常严格的部署，可以使用：
+
+```text
+always_owner_focus
+```
+
+用成本换取更稳定的主人音轨提取。
+
+### 7. Gateway 能力请求与本地模型加载解耦
+
+v0.4 明确区分两组开关。
+
+Gateway 请求能力：
+
+```text
+AUDIO_DIARIZATION_ENABLED
+AUDIO_SEPARATION_ENABLED
+AUDIO_ENVIRONMENT_ENABLED
+AUDIO_SEGMENT_TRANSCRIPTION_ENABLED
+```
+
+本地 Python 模型加载能力：
+
+```text
+DIARIZATION_ENABLED
+SPEECH_SEPARATION_ENABLED
+ENVIRONMENT_INTELLIGENCE_ENABLED
+SEGMENT_TRANSCRIPTION_ENABLED
+```
+
+因此低配服务器可以配置：
+
+```text
+Gateway:
+  AUDIO_SEPARATION_ENABLED=true
+  AUDIO_ENVIRONMENT_ENABLED=true
+  AUDIO_SEGMENT_TRANSCRIPTION_ENABLED=true
+
+Local Service:
+  SPEECH_SEPARATION_ENABLED=false
+  ENVIRONMENT_INTELLIGENCE_ENABLED=false
+  SEGMENT_TRANSCRIPTION_ENABLED=false
+```
+
+含义是“系统需要这些能力”，但能力由 Cloud / Remote Provider 满足，而不是在本机加载重模型。
+
+### 8. 低配 Ubuntu 推荐部署
+
+对于 4 vCPU / 4 GB RAM / 无 GPU：
+
+本地保留：
+
+- Realtime Gateway；
+- PostgreSQL + pgvector；
+- ECAPA Speaker Embedding；
+- 基础 Diarization；
+- Audio Front-End；
+- Social Conversation Manager。
+
+迁移到 Cloud：
+
+- Environment Intelligence；
+- Audio Event Understanding；
+- Diarized Transcription。
+
+迁移到 Remote GPU：
+
+- SepFormer Speech Separation；
+- Target Speaker Extraction。
+
+### 9. 新增环境变量
+
+```text
+CLOUD_AUDIO_INTELLIGENCE_ENABLED
+CLOUD_AUDIO_ENVIRONMENT_ENABLED
+CLOUD_AUDIO_DIARIZED_TRANSCRIPTION_ENABLED
+CLOUD_AUDIO_TIMEOUT_MS
+QWEN_OMNI_API_KEY
+QWEN_OMNI_BASE_URL
+QWEN_OMNI_MODEL
+
+REMOTE_SEPARATION_ENABLED
+REMOTE_SEPARATION_BASE_URL
+REMOTE_SEPARATION_TOKEN
+REMOTE_SEPARATION_TIMEOUT_MS
+REMOTE_SEPARATION_TRIGGER
+```
+
+`QWEN_OMNI_API_KEY` 留空时复用 `DASHSCOPE_API_KEY`。
+
+`QWEN_OMNI_BASE_URL` 留空时：
+
+- 有 `DASHSCOPE_WORKSPACE_ID`：自动生成北京地域 Workspace 专属 OpenAI-compatible URL；
+- 无 Workspace ID：使用 DashScope compatible-mode 地址。
+
+### 10. 隐私和数据边界
+
+Cloud Audio Intelligence 会把当前短 utterance 发送给配置的云 Provider。
+
+长期声纹数据仍遵循 v0.3 规则：
+
+- 不向 Qwen Omni 发送 Voice Profile centroid；
+- 不向 Cloud Diarized Transcription Provider 发送长期人物数据库；
+- Owner embedding 只在需要 Remote Target Speaker Extraction 时发送给用户配置的 Remote GPU Worker；
+- 长期 Voice Profile 继续由 PostgreSQL 加密存储和租户隔离保护。
+
+后续生产部署应在隐私政策中明确云端音频处理范围。
+
+### 11. 测试策略
+
+新增回归测试覆盖：
+
+- Local identity segment 与 Cloud transcript 的时间对齐；
+- Cloud Environment 结果覆盖本地增强结果；
+- 多说话人提示触发 Remote Target Speaker；
+- Remote Target 命中后标记 overlap；
+- Cloud Provider 故障时 fail-open；
+- Qwen Omni SSE 文本解析；
+- PCM → WAV 输入封装。
+
+---
+
+## 2026-07-20 · v0.3 Complete Social Voice Architecture
+
+### 核心完成
+
+v0.3 建立完整 Social Voice 基线：
+
+- ECAPA Speaker Embedding；
+- 在线 Diarization；
+- SepFormer overlap / separation；
+- Target Speaker Extraction；
+- faster-whisper 分段转写；
+- AST Environment Intelligence；
+- Streaming Audio Front-End：Beamforming / AEC / NS / AGC / Dereverb；
+- `auto / owner_focus / group` 模式；
+- Social Conversation Manager 实时决策；
+- Group Transcript；
+- Environment risk 主动提醒；
+- HS256 JWT 多租户 IAM；
+- Speaker Consent / Delete / Audit；
+- PostgreSQL + pgvector 长期身份；
+- AES-256-GCM Keyring 和在线密钥轮换。
+
+v0.3 的重模型全部保留为可用本地实现；v0.4 只是增加更适合生产部署的混合计算位置。
 
 ---
 
@@ -347,19 +352,13 @@ npm run build
 
 ### 核心完成
 
-- 将 `SpeakerIdentityStore` 从单个 `RealtimeSession` 生命周期提升为 Gateway 共享依赖；
-- 抽象同步/异步统一 Store 接口；
-- 新增 PostgreSQL + pgvector 持久化；
-- 数据模型：`persons / speaker_profiles / speaker_samples`；
-- canonical centroid / sample embedding 使用 AES-256-GCM 应用层加密；
-- AAD 绑定 tenant / user / profile / sample 上下文；
-- pgvector 只保存 keyed orthogonal search projection；
-- `tenantId + userId` 数据层隔离；
-- 新增人物/声纹删除协议；
-- PostgreSQL 级联删除 Profile / Samples；
-- 默认保留 Memory Store 作为开发和降级实现。
-
-详细设计见 `docs/SPEAKER_IDENTITY_PERSISTENCE.md`。
+- Speaker Identity Store 提升为 Gateway 共享依赖；
+- PostgreSQL + pgvector；
+- Person / Voice Profile / Voice Sample；
+- AES-256-GCM canonical embedding 加密；
+- tenant/user 隔离；
+- keyed orthogonal search projection；
+- 人物和声纹删除协议。
 
 ---
 
@@ -367,24 +366,20 @@ npm run build
 
 ### 核心完成
 
-- 独立 `services/speaker-intelligence` 服务；
-- SpeechBrain ECAPA-TDNN Speaker Embedding；
+- 独立 Speaker Intelligence Service；
+- SpeechBrain ECAPA-TDNN；
 - `HttpSpeakerIntelligenceProvider`；
 - Qwen Server VAD 轮次缓存；
-- 约 350ms pre-roll；
-- 会话级 `SessionSpeakerTracker`；
-- `speaker.identified / speaker.filtered`；
-- 多人模式 Speaker Attribution；
-- 专注模式保守过滤已确认非主人；
-- Provider 超时/失败不阻断核心实时语音链路。
+- Session Speaker Tracker；
+- Speaker Attribution；
+- Owner Focus 保守过滤；
+- Provider 故障不阻断主语音链路。
 
 ---
 
 ## 2026-07-20 · v0.2 Audio Intelligence Foundation
 
-### 核心完成
-
-建立三层架构：
+建立：
 
 ```text
 Audio Intelligence
@@ -394,30 +389,20 @@ Social Intelligence
 Conversation Intelligence
 ```
 
-新增：
-
-- `@aipany/audio-intelligence`；
-- `AudioIntelligenceEngine`；
-- `ModeManager`；
-- `ProgressiveVoiceEnrollmentManager`；
-- `SocialConversationManager`；
-- `auto / owner_focus / group`；
-- Speaker / Diarization / Environment Provider 抽象；
-- 多样本 Voice Profile；
-- 渐进式人物声纹学习。
+并新增 Mode Manager、Progressive Enrollment、Social Conversation Manager 与 Provider 抽象。
 
 ---
 
 ## 2026-07-20 · v0.1 Cascaded Realtime Voice
 
-### 核心架构
+建立最初实时链路：
 
 ```text
 Device PCM
 ↓
-Qwen3 Realtime ASR
+Qwen Realtime ASR
 ↓
-OpenAI-compatible Text LLM
+OpenAI-compatible LLM
 ↓
 Emotion Director
 ↓
@@ -426,14 +411,4 @@ Qwen Realtime TTS
 Streaming PCM
 ```
 
-### 已建立能力
-
-- WebSocket 长连接；
-- Streaming ASR / LLM / TTS；
-- Server VAD；
-- Barge-in；
-- LLM / TTS Cancel；
-- 客户端播放队列清空协议；
-- ASR 情绪到 TTS 表达指令；
-- 统一 Aipany Protocol；
-- 设备不直接绑定具体 AI Provider。
+支持 WebSocket、Server VAD、Barge-in、Cancel 和统一 Aipany Protocol。
