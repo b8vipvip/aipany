@@ -30,6 +30,18 @@ const envSchema = z.object({
   LLM_TEMPERATURE: z.coerce.number().min(0).max(2).default(0.8),
   LLM_MAX_TOKENS: z.coerce.number().int().positive().default(800),
 
+  SPEAKER_INTELLIGENCE_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  SPEAKER_INTELLIGENCE_BASE_URL: z.string().url().default("http://speaker-intelligence:3200"),
+  SPEAKER_INTELLIGENCE_TOKEN: z.string().optional(),
+  SPEAKER_INTELLIGENCE_TIMEOUT_MS: z.coerce.number().int().min(300).max(30000).default(2500),
+  SPEAKER_MIN_AUDIO_MS: z.coerce.number().int().min(300).max(10000).default(700),
+  SPEAKER_PRE_ROLL_MS: z.coerce.number().int().min(0).max(2000).default(350),
+  SPEAKER_ANALYSIS_WAIT_MS: z.coerce.number().int().min(0).max(5000).default(700),
+  SPEAKER_SESSION_MATCH_THRESHOLD: z.coerce.number().min(-1).max(1).default(0.76),
+
   MAX_HISTORY_MESSAGES: z.coerce.number().int().min(4).max(100).default(20),
   DEFAULT_SYSTEM_PROMPT: z.string().default(
     "你是一个自然、温暖、有陪伴感的中文语音助手。回答适合直接说出口，优先简洁、口语化。可以自然使用语气词，但不要刻意堆砌。不要输出舞台说明、Markdown 或情绪标签。",
@@ -77,6 +89,16 @@ export function loadConfig() {
       model: env.LLM_MODEL,
       temperature: env.LLM_TEMPERATURE,
       maxTokens: env.LLM_MAX_TOKENS,
+    },
+    speaker: {
+      enabled: env.SPEAKER_INTELLIGENCE_ENABLED,
+      baseUrl: env.SPEAKER_INTELLIGENCE_BASE_URL.replace(/\/$/, ""),
+      token: env.SPEAKER_INTELLIGENCE_TOKEN,
+      timeoutMs: env.SPEAKER_INTELLIGENCE_TIMEOUT_MS,
+      minAudioMs: env.SPEAKER_MIN_AUDIO_MS,
+      preRollMs: env.SPEAKER_PRE_ROLL_MS,
+      analysisWaitMs: env.SPEAKER_ANALYSIS_WAIT_MS,
+      sessionMatchThreshold: env.SPEAKER_SESSION_MATCH_THRESHOLD,
     },
     conversation: {
       maxHistoryMessages: env.MAX_HISTORY_MESSAGES,
