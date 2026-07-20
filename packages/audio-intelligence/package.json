@@ -1,6 +1,6 @@
 {
   "name": "@aipany/audio-intelligence",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
@@ -16,8 +16,12 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test test/**/*.test.ts"
   },
+  "dependencies": {
+    "pg": "^8.13.3"
+  },
   "devDependencies": {
     "@types/node": "^22.13.10",
+    "@types/pg": "^8.11.11",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2"
   }
