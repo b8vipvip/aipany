@@ -3,10 +3,15 @@ import WebSocket from "ws";
 import {
   INPUT_AUDIO_FORMAT,
   OUTPUT_AUDIO_FORMAT,
+  type InteractionMode,
   type ServerEvent,
   type SessionStartEvent,
   type UserEmotion,
 } from "@aipany/protocol";
+import {
+  AudioIntelligenceEngine,
+  type SpeakerObservation,
+} from "@aipany/audio-intelligence";
 import type { AppConfig } from "../config.js";
 import { QwenAsrRealtimeClient } from "../providers/qwen-asr.js";
 import { QwenTtsRealtimeClient } from "../providers/qwen-tts.js";
@@ -28,6 +33,9 @@ export class RealtimeSession {
   private readonly emotionDirector = new EmotionDirector();
   private history: ChatMessage[] = [];
   private activeResponse?: ActiveResponse;
+  private audioIntelligence?: AudioIntelligenceEngine;
+  private activeEnrollmentId?: string;
+  private socialProactivity = 0.45;
   private started = false;
   private closed = false;
 
@@ -41,6 +49,13 @@ export class RealtimeSession {
   async start(event: SessionStartEvent): Promise<void> {
     if (this.started) throw new Error("会话已经启动");
     this.started = true;
+    this.socialProactivity = event.session.socialProactivity;
+    this.audioIntelligence = new AudioIntelligenceEngine({
+      mode: {
+        initialMode: event.session.interactionMode,
+        initialActiveMode: event.session.interactionMode === "group" ? "group" : "owner_focus",
+      },
+    });
 
     const systemPrompt = event.session.systemPrompt?.trim() || this.config.conversation.defaultSystemPrompt;
     this.history = [{ role: "system", content: systemPrompt }];
@@ -51,6 +66,7 @@ export class RealtimeSession {
       inputAudio: INPUT_AUDIO_FORMAT,
       outputAudio: OUTPUT_AUDIO_FORMAT,
     });
+    this.sendModeState();
 
     const asr = new QwenAsrRealtimeClient({
       apiKey: this.config.qwen.apiKey,
@@ -98,11 +114,85 @@ export class RealtimeSession {
   }
 
   commitAudio(): void {
-    // 第一版固定使用服务端 VAD，边界由千问 ASR 自动提交。该事件仅为协议兼容预留。
+    // 当前使用千问 Server VAD 自动切轮。事件继续保留，为后续客户端 VAD/硬件端点检测兼容。
   }
 
   cancelResponse(): void {
     this.interrupt("client_cancel");
+  }
+
+  setInteractionMode(mode: InteractionMode, source: "manual" | "voice_command" | "auto"): void {
+    const engine = this.audioIntelligence;
+    if (!engine) return;
+    engine.setMode(mode, source);
+    this.sendModeState();
+  }
+
+  respondToModeSuggestion(suggestionId: string, accepted: boolean): void {
+    const manager = this.audioIntelligence?.modes;
+    if (!manager) return;
+    if (accepted) {
+      const state = manager.acceptSuggestion(suggestionId);
+      if (state) this.sendModeState();
+      return;
+    }
+    manager.dismissSuggestion(suggestionId);
+  }
+
+  startSpeakerEnrollment(input: { personName: string; relation?: string; isOwner?: boolean }): void {
+    const engine = this.audioIntelligence;
+    if (!engine) return;
+    const enrollment = engine.enrollments.begin({
+      sessionId: this.id,
+      personName: input.personName,
+      relation: input.relation,
+      isOwner: input.isOwner,
+    });
+    this.activeEnrollmentId = enrollment.id;
+    this.send({
+      type: "speaker.enrollment.started",
+      enrollmentId: enrollment.id,
+      personId: enrollment.personId,
+      personName: enrollment.personName,
+    });
+  }
+
+  cancelSpeakerEnrollment(enrollmentId: string): void {
+    const state = this.audioIntelligence?.enrollments.cancel(enrollmentId);
+    if (!state) return;
+    if (this.activeEnrollmentId === enrollmentId) this.activeEnrollmentId = undefined;
+    this.send({ type: "speaker.enrollment.cancelled", enrollmentId });
+  }
+
+  /**
+   * 供下一阶段真实 Speaker Provider 调用。
+   * 当前千问 ASR 本身不提供说话人分离，因此 v0.2 先把统一入口和业务闭环打通。
+   */
+  observeSpeaker(observation: SpeakerObservation): void {
+    const engine = this.audioIntelligence;
+    if (!engine) return;
+
+    const { suggestion } = engine.observeSpeaker(observation);
+    if (suggestion) {
+      this.send({
+        type: "mode.suggestion",
+        suggestionId: suggestion.id,
+        from: suggestion.from,
+        to: suggestion.to,
+        reason: suggestion.reason,
+        speakerCount: suggestion.speakerCount,
+      });
+    }
+
+    if (!this.activeEnrollmentId) return;
+    const result = engine.enrollments.ingest(this.activeEnrollmentId, observation);
+    this.send({
+      type: "speaker.enrollment.updated",
+      enrollmentId: result.state.id,
+      acceptedSamples: result.state.acceptedSamples,
+      status: result.state.status,
+    });
+    if (result.state.status === "confirmed") this.activeEnrollmentId = undefined;
   }
 
   close(): void {
@@ -117,8 +207,20 @@ export class RealtimeSession {
     if (this.closed) return;
     this.interrupt("new_turn");
 
+    const modeCommand = this.audioIntelligence?.detectModeCommand(text);
+    if (modeCommand) this.setInteractionMode(modeCommand, "voice_command");
+
     this.history.push({ role: "user", content: text });
     this.trimHistory();
+
+    const requestMessages = [...this.history];
+    const modeState = this.audioIntelligence?.modes.getState();
+    if (modeState) {
+      requestMessages.push({
+        role: "system",
+        content: buildModeInstruction(modeState.configuredMode, modeState.activeMode, this.socialProactivity, Boolean(modeCommand)),
+      });
+    }
 
     const response: ActiveResponse = {
       id: randomUUID(),
@@ -165,7 +267,7 @@ export class RealtimeSession {
 
     try {
       await this.llm.streamChat({
-        messages: [...this.history],
+        messages: requestMessages,
         signal: response.abortController.signal,
         onDelta: async (delta) => {
           if (response.interrupted || this.activeResponse?.id !== response.id) return;
@@ -201,6 +303,17 @@ export class RealtimeSession {
     }
   }
 
+  private sendModeState(): void {
+    const state = this.audioIntelligence?.modes.getState();
+    if (!state) return;
+    this.send({
+      type: "mode.changed",
+      configuredMode: state.configuredMode,
+      activeMode: state.activeMode,
+      source: state.source,
+    });
+  }
+
   private interrupt(reason: "barge_in" | "client_cancel" | "new_turn"): void {
     const response = this.activeResponse;
     if (!response || response.interrupted) return;
@@ -226,6 +339,21 @@ export class RealtimeSession {
   private sendError(code: string, message: string, retryable: boolean): void {
     this.send({ type: "error", code, message, retryable });
   }
+}
+
+function buildModeInstruction(
+  configuredMode: InteractionMode,
+  activeMode: "owner_focus" | "group",
+  proactivity: number,
+  switchedByVoice: boolean,
+): string {
+  const activeDescription = activeMode === "group"
+    ? "当前处于多人聊天模式。要理解不同参与者的上下文，不要每句话都抢答；只有被明确询问，或出现非常合适且有价值的自然插话机会时才发言。"
+    : "当前处于专注模式。主要和设备主人持续交流，忽略无关背景对话。";
+  const switchInstruction = switchedByVoice
+    ? "用户刚刚通过语音切换了交互模式，请先用一句很自然的话简短确认，然后继续当前对话。"
+    : "";
+  return `${activeDescription} 用户配置模式=${configuredMode}，主动参与程度=${proactivity.toFixed(2)}。${switchInstruction}`;
 }
 
 function isAbortError(error: unknown): boolean {
