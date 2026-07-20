@@ -2,7 +2,7 @@ import type { SocialDecision, SocialTurnContext } from "./types.js";
 
 /**
  * 决定 AI 在多人场景中应该回答、保持安静还是主动插话。
- * v0.2 先使用透明可调的规则评分，后续可替换为小模型/策略模型。
+ * 规则层只负责可解释的实时门控，Conversation Brain 仍负责最终生成内容。
  */
 export class SocialConversationManager {
   decide(context: SocialTurnContext): SocialDecision {
@@ -19,6 +19,16 @@ export class SocialConversationManager {
 
     if (context.addressedToAssistant || context.explicitWakeWord || context.directQuestionToAssistant) {
       return { action: "respond", score: 1, reason: "explicitly_addressed" };
+    }
+
+    // 高置信度安全风险允许 AI 在较短自然停顿后主动提醒。
+    // 即使前一刻存在多人重叠，也不会在大家同时讲话时抢话，而是等待最小停顿窗口。
+    if (context.urgencyScore >= 0.82 && !context.humanOverlap && context.naturalPauseMs >= 320) {
+      return {
+        action: "intervene",
+        score: clamp(context.urgencyScore * 0.9 + context.helpfulnessScore * 0.1, 0, 1),
+        reason: "urgent_intervention",
+      };
     }
 
     if (context.humanOverlap) {
