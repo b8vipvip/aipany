@@ -1,7 +1,11 @@
 import {
   SessionSpeakerTracker,
+  type AudioFormatDescriptor,
   type SpeakerEmbeddingProvider,
   type SpeakerObservation,
+  type UtteranceAudioAnalysis,
+  type UtteranceAudioAnalysisOptions,
+  type UtteranceAudioAnalysisProvider,
 } from "@aipany/audio-intelligence";
 import { INPUT_AUDIO_FORMAT } from "@aipany/protocol";
 
@@ -10,20 +14,26 @@ export interface UtteranceSpeakerAnalyzerOptions {
   minAudioMs?: number;
   sessionMatchThreshold?: number;
   maxSpeakers?: number;
+  format?: AudioFormatDescriptor;
+}
+
+export interface UtteranceSpeakerAnalysis {
+  observation: SpeakerObservation;
+  audioAnalysis: UtteranceAudioAnalysis;
 }
 
 /**
- * 收集千问 Server VAD 切出的单个语音轮次，并调用 Speaker Intelligence Provider。
+ * 收集 Server VAD 切出的单个语音轮次，并调用 Audio/Speaker Intelligence Provider。
  *
- * 设计原则：
- * - 预留一小段 pre-roll，避免远端 VAD 的 speech_started 事件到达时丢失句首。
- * - 每个 VAD 轮次只提取一次 embedding，控制 CPU/GPU 成本。
- * - 会话内先用 embedding 聚类生成稳定 Speaker ID，再交给长期 Voice Profile 做人物匹配。
+ * Provider 支持 v0.3 analyzeUtterance 时，一次分析同时得到：
+ * embedding、轮次内 diarization、重叠讲话、环境事件、分段转写和目标说话人提取。
+ * 旧 Provider 仍可只实现 extractEmbedding，Gateway 会自动降级。
  */
 export class UtteranceSpeakerAnalyzer {
   private readonly tracker: SessionSpeakerTracker;
   private readonly preRollBytes: number;
   private readonly minAudioBytes: number;
+  private readonly format: AudioFormatDescriptor;
   private preRollChunks: Buffer[] = [];
   private preRollSize = 0;
   private utteranceChunks: Buffer[] = [];
@@ -33,7 +43,9 @@ export class UtteranceSpeakerAnalyzer {
     private readonly provider: SpeakerEmbeddingProvider,
     options: UtteranceSpeakerAnalyzerOptions = {},
   ) {
-    const bytesPerMs = INPUT_AUDIO_FORMAT.sampleRate * INPUT_AUDIO_FORMAT.channels * 2 / 1000;
+    this.format = options.format ?? INPUT_AUDIO_FORMAT;
+    const bytesPerSample = this.format.encoding === "pcm_f32le" ? 4 : 2;
+    const bytesPerMs = this.format.sampleRate * this.format.channels * bytesPerSample / 1000;
     this.preRollBytes = Math.max(0, Math.round((options.preRollMs ?? 350) * bytesPerMs));
     this.minAudioBytes = Math.max(1, Math.round((options.minAudioMs ?? 700) * bytesPerMs));
     this.tracker = new SessionSpeakerTracker({
@@ -56,7 +68,15 @@ export class UtteranceSpeakerAnalyzer {
       : [];
   }
 
+  /** 兼容 v0.2 调用，只返回主说话人 observation。 */
   stopSpeech(): Promise<SpeakerObservation | undefined> | undefined {
+    const detailed = this.stopSpeechDetailed();
+    return detailed?.then((result) => result?.observation);
+  }
+
+  stopSpeechDetailed(
+    options: UtteranceAudioAnalysisOptions = {},
+  ): Promise<UtteranceSpeakerAnalysis | undefined> | undefined {
     if (!this.collecting) return undefined;
     this.collecting = false;
     const chunks = this.utteranceChunks;
@@ -65,7 +85,7 @@ export class UtteranceSpeakerAnalyzer {
     if (totalBytes < this.minAudioBytes) return Promise.resolve(undefined);
 
     const audio = Buffer.concat(chunks, totalBytes);
-    return this.analyze(audio);
+    return this.analyze(audio, options);
   }
 
   reset(): void {
@@ -75,22 +95,48 @@ export class UtteranceSpeakerAnalyzer {
     this.preRollSize = 0;
   }
 
-  private async analyze(audio: Buffer): Promise<SpeakerObservation> {
-    const result = await this.provider.extractEmbedding(audio, {
-      encoding: INPUT_AUDIO_FORMAT.encoding,
-      sampleRate: INPUT_AUDIO_FORMAT.sampleRate,
-      channels: INPUT_AUDIO_FORMAT.channels,
-    });
+  private async analyze(
+    audio: Buffer,
+    options: UtteranceAudioAnalysisOptions,
+  ): Promise<UtteranceSpeakerAnalysis> {
+    const provider = this.provider as SpeakerEmbeddingProvider & Partial<UtteranceAudioAnalysisProvider>;
+    const audioAnalysis = typeof provider.analyzeUtterance === "function"
+      ? await provider.analyzeUtterance(audio, this.format, options)
+      : await this.fallbackAnalysis(audio);
+
     const observedAt = Date.now();
-    const assignment = this.tracker.observe(result.embedding, observedAt);
+    const mappedSegments = audioAnalysis.diarization.map((segment) => {
+      if (!segment.embedding?.length) return { ...segment };
+      const assignment = this.tracker.observe(segment.embedding, observedAt + segment.startMs);
+      return { ...segment, speakerId: assignment.sessionSpeakerId };
+    });
+
+    const assignment = this.tracker.observe(audioAnalysis.embedding, observedAt);
+    for (const segment of mappedSegments) {
+      if (!segment.embedding && mappedSegments.length === 1) segment.speakerId = assignment.sessionSpeakerId;
+    }
+    audioAnalysis.diarization = mappedSegments;
 
     return {
-      sessionSpeakerId: assignment.sessionSpeakerId,
-      observedAt,
-      speechDurationMs: result.durationMs,
-      confidence: result.quality,
-      embedding: result.embedding,
-      proximity: "unknown",
+      observation: {
+        sessionSpeakerId: assignment.sessionSpeakerId,
+        observedAt,
+        speechDurationMs: audioAnalysis.durationMs,
+        confidence: audioAnalysis.quality,
+        embedding: audioAnalysis.embedding,
+        proximity: audioAnalysis.proximity ?? "unknown",
+        environment: audioAnalysis.environment,
+      },
+      audioAnalysis,
+    };
+  }
+
+  private async fallbackAnalysis(audio: Buffer): Promise<UtteranceAudioAnalysis> {
+    const result = await this.provider.extractEmbedding(audio, this.format);
+    return {
+      ...result,
+      diarization: [],
+      overlapDetected: false,
     };
   }
 
