@@ -42,6 +42,16 @@ const envSchema = z.object({
   SPEAKER_ANALYSIS_WAIT_MS: z.coerce.number().int().min(0).max(5000).default(700),
   SPEAKER_SESSION_MATCH_THRESHOLD: z.coerce.number().min(-1).max(1).default(0.76),
 
+  SPEAKER_IDENTITY_STORE: z.enum(["memory", "postgres"]).default("memory"),
+  DATABASE_URL: z.string().optional(),
+  SPEAKER_IDENTITY_ENCRYPTION_KEY: z.string().optional(),
+  SPEAKER_IDENTITY_DATABASE_SSL: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  SPEAKER_IDENTITY_DB_POOL_MAX: z.coerce.number().int().min(1).max(100).default(10),
+  SPEAKER_IDENTITY_MATCH_CANDIDATES: z.coerce.number().int().min(1).max(100).default(20),
+
   MAX_HISTORY_MESSAGES: z.coerce.number().int().min(4).max(100).default(20),
   DEFAULT_SYSTEM_PROMPT: z.string().default(
     "你是一个自然、温暖、有陪伴感的中文语音助手。回答适合直接说出口，优先简洁、口语化。可以自然使用语气词，但不要刻意堆砌。不要输出舞台说明、Markdown 或情绪标签。",
@@ -58,6 +68,15 @@ export function loadConfig() {
   }
 
   const env = parsed.data;
+  if (env.SPEAKER_IDENTITY_STORE === "postgres") {
+    if (!env.DATABASE_URL?.trim()) {
+      throw new Error("环境变量配置错误：SPEAKER_IDENTITY_STORE=postgres 时必须配置 DATABASE_URL");
+    }
+    if (!env.SPEAKER_IDENTITY_ENCRYPTION_KEY?.trim()) {
+      throw new Error("环境变量配置错误：SPEAKER_IDENTITY_STORE=postgres 时必须配置 SPEAKER_IDENTITY_ENCRYPTION_KEY");
+    }
+  }
+
   const workspaceBase = env.DASHSCOPE_WORKSPACE_ID
     ? `wss://${env.DASHSCOPE_WORKSPACE_ID}.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime`
     : "wss://dashscope.aliyuncs.com/api-ws/v1/realtime";
@@ -99,6 +118,14 @@ export function loadConfig() {
       preRollMs: env.SPEAKER_PRE_ROLL_MS,
       analysisWaitMs: env.SPEAKER_ANALYSIS_WAIT_MS,
       sessionMatchThreshold: env.SPEAKER_SESSION_MATCH_THRESHOLD,
+    },
+    speakerIdentity: {
+      store: env.SPEAKER_IDENTITY_STORE,
+      connectionString: env.DATABASE_URL,
+      encryptionKey: env.SPEAKER_IDENTITY_ENCRYPTION_KEY,
+      databaseSsl: env.SPEAKER_IDENTITY_DATABASE_SSL,
+      poolMax: env.SPEAKER_IDENTITY_DB_POOL_MAX,
+      matchCandidates: env.SPEAKER_IDENTITY_MATCH_CANDIDATES,
     },
     conversation: {
       maxHistoryMessages: env.MAX_HISTORY_MESSAGES,
