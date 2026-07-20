@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage } from "node:http";
 import WebSocket, { WebSocketServer } from "ws";
 import {
   InMemorySpeakerIdentityStore,
-  PostgresSpeakerIdentityStore,
+  KeyringPostgresSpeakerIdentityStore,
   PrivacyAwareSpeakerIdentityStore,
   type SpeakerIdentityStore,
 } from "@aipany/audio-intelligence";
@@ -180,7 +180,7 @@ function createSpeakerIdentityStore(config: AppConfig): SpeakerIdentityStore {
     throw new Error("PostgreSQL Speaker Identity Store 缺少 DATABASE_URL 或 SPEAKER_IDENTITY_ENCRYPTION_KEY");
   }
 
-  const delegate = new PostgresSpeakerIdentityStore({
+  const delegate = new KeyringPostgresSpeakerIdentityStore({
     connectionString,
     encryptionKey,
     ssl: config.speakerIdentity.databaseSsl,
