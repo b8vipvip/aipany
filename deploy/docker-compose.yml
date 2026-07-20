@@ -22,6 +22,13 @@ services:
     env_file:
       - ../.env
     restart: unless-stopped
+    shm_size: "2gb"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3200/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 60s
+      retries: 10
     volumes:
       - speaker-models:/models
 
@@ -36,7 +43,7 @@ services:
       postgres:
         condition: service_healthy
       speaker-intelligence:
-        condition: service_started
+        condition: service_healthy
     ports:
       - "127.0.0.1:3000:3000"
 
