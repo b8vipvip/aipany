@@ -1,92 +1,128 @@
 # Aipany
 
-Aipany 是一个以移动端为起点的实时 AI 语音平台，未来将扩展为可复用的 AI 语音云服务，为 ESP32-S3、智能音箱、AI 玩具、机器人以及第三方智能硬件提供统一接入能力。
-
-> 当前阶段：V1 已合并到 `main`，正在进行云端编译与真机链路验证。
-
-第一阶段产品目标是在手机端实现低延迟、可自然打断、可连续交流的 AI 语音陪伴体验。后端从一开始就保持设备无关，使未来的嵌入式设备可以直接复用同一套 Agent、Memory、Tool、Device 和 Usage 基础设施。
-
-## 产品方向
-
-- 低延迟、可自然打断的实时语音对话
-- 先支持手机 App，后续无缝扩展 ESP32
-- 可配置的 Agent 人设与声音
-- 用户长期记忆
-- 工具调用、知识检索与复杂任务委派
-- 多设备统一会话与能力模型
-- 面向硬件厂商的多租户 AI 语音云平台
-
-## 核心架构原则
-
-**手机 App 也是一种 Device，而不是后端中的特殊客户端。**
-
-所有客户端都通过统一的 Device + Session 抽象接入平台，并上报自身能力。手机、Web、ESP32、智能音箱和机器人可以使用不同的音频传输方式，但共享同一个 AI Brain 和平台服务。
-
-## 仓库结构
+Aipany 第一版已经切换为**级联实时语音架构**：
 
 ```text
-apps/
-  mobile/             # 第一款实时语音客户端
-  admin-web/          # 后续的平台管理后台
-
-clients/
-  esp32-sdk/          # 预留的嵌入式设备 SDK 边界
-
-firmware/
-  esp32/              # 后续 ESP32-S3 参考固件
-
-services/             # 按业务领域划分的后端服务
-
-packages/
-  protocol/           # 跨设备共享、带版本号的协议定义
-
-docs/
-  architecture/       # 系统架构设计
-  roadmap/            # 开发路线图
+设备持续音频
+   ↓
+千问 qwen3-asr-flash-realtime
+   ↓ 文字 + 用户情绪
+OpenAI 兼容中转站 LLM
+   ↓ 流式 Token
+Aipany Emotion Director
+   ↓ 情绪/语气指令
+千问 qwen3-tts-instruct-flash-realtime
+   ↓ 流式 PCM
+设备连续播放
 ```
 
-## 当前基础能力
+这不是“录完一句再请求”的传统一问一答。客户端只建立一次长连接，麦克风持续上行；ASR、LLM、TTS 全部流式工作，并支持用户在 AI 播放过程中随时插话打断。
 
-当前 `main` 已包含：
+## 当前能力
 
-- pnpm + Turborepo Monorepo 配置；
-- 统一的严格 TypeScript 配置；
-- `@aipany/protocol` 跨设备会话、语音、工具和设备命令协议；
-- Voice Session 安全会话启动服务；
-- OpenAI Realtime 第一版 Provider Adapter；
-- 手机端 Expo + React Native + WebRTC 客户端；
-- 第三方 API、中转站和多 Provider 扩展架构；
-- ESP32 后续接入边界；
-- GitHub Actions 自动类型检查、测试和 Android Release APK 云端编译。
+- 长连接持续语音会话
+- 千问实时 ASR
+- ASR Partial / Final 转写
+- ASR 基础情绪识别
+- 服务端 VAD
+- OpenAI-compatible 中转站 LLM 流式输出
+- 千问实时 TTS
+- 基于用户情绪的 TTS 语气指令
+- Barge-in：用户插话立即取消 LLM/TTS
+- 统一客户端事件协议
+- 会话上下文裁剪
+- 健康检查与 Docker 部署骨架
 
-## 云端编译
+## 目录
 
-仓库已经配置 GitHub Actions：
+```text
+packages/protocol/             客户端与网关统一协议
+services/realtime-gateway/     级联实时语音核心服务
+  src/providers/               千问 ASR/TTS、中转站 LLM 适配器
+  src/pipeline/                情绪导演、流式文本切片
+  src/session/                 持续会话、上下文、打断控制
+docs/architecture.md           架构与时序
+deploy/docker-compose.yml      第一版部署文件
+```
 
-- `代码检查`：在 Ubuntu Runner 中安装依赖、执行 TypeScript 类型检查和测试；
-- `Android APK 云端编译`：自动执行 Expo Prebuild，并在 Ubuntu Runner 中编译 Android Release APK；
-- 编译成功后，APK 会作为 GitHub Actions Artifact 保存 14 天；
-- 可在 GitHub 仓库变量中配置 `AIPANY_API_BASE_URL`，将正式后端地址写入构建产物。
+## 启动
 
-Android 编译不要求本地 Windows 开发环境。iOS 原生应用仍需要 macOS 构建环境，后续可以选择 GitHub macOS Runner 或 Expo EAS Build 云服务。
-
-## 从这里开始
-
-平台总体设计请阅读 `docs/architecture/system-overview.md`，实施顺序请阅读 `docs/roadmap/v1.md`。
-
-## Provider 配置后台与 Ubuntu 部署
-
-本阶段新增 `services/admin-api`、`apps/admin-web`、`packages/provider-types` 与 `deploy/ubuntu`。管理后台用于统一配置 Realtime、Text、ASR、TTS Provider；永久 API Key 只保存在服务端数据库，并使用 AES-256-GCM 加密。手机 App 和未来 ESP32 仍只调用 Aipany 统一接口。
-
-Ubuntu 单机部署示例：
+Node.js 22+：
 
 ```bash
-cp deploy/ubuntu/.env.example deploy/ubuntu/.env
-docker compose -f deploy/ubuntu/docker-compose.yml up -d --build
+cp .env.example .env
+# 填写 DASHSCOPE_API_KEY、LLM_API_KEY、LLM_BASE_URL、LLM_MODEL
+npm install
+npm run dev
 ```
 
-生产环境部署前必须启用 `ADMIN_API_TOKEN`，并继续接入正式 Admin Authentication。更多说明见 `docs/architecture/provider-config.md` 与 `docs/architecture/deployment.md`。
+健康检查：
 
-## 安全要求
+```bash
+curl http://127.0.0.1:3000/health
+```
 
-禁止在手机 App 或嵌入式设备中写入永久的 AI 服务商 API Key。客户端只能从 Aipany 服务端获取短期会话凭证。真实密钥必须存放在服务端的密钥管理环境中，并且绝不能提交到本仓库。
+WebSocket：
+
+```text
+ws://127.0.0.1:3000/v1/realtime
+```
+
+生产环境建议通过 Nginx/Caddy 暴露 `wss://`。
+
+## 客户端协议
+
+连接成功后先发送：
+
+```json
+{
+  "type": "session.start",
+  "session": {
+    "userId": "user-001",
+    "agentId": "default-agent",
+    "locale": "zh-CN",
+    "device": {
+      "deviceId": "mobile-001",
+      "productId": "aipany-mobile",
+      "deviceType": "mobile",
+      "platform": "android"
+    }
+  }
+}
+```
+
+收到 `session.ready` 后，持续发送**二进制 PCM 音频帧**：
+
+```text
+PCM S16LE
+16000 Hz
+Mono
+```
+
+服务端下行：
+
+- JSON：`transcript.partial`、`transcript.final`、`response.text.delta`、`response.interrupted` 等控制事件。
+- Binary：AI TTS 的 `PCM S16LE / 24000 Hz / Mono` 音频块。
+
+收到 `response.interrupted` 后，客户端必须立即停止播放并清空尚未播放的音频缓冲，才能实现真正的 Barge-in。
+
+## 情绪链路
+
+千问 ASR 当前可返回基础情绪标签，第一版 Emotion Director 会按用户情绪选择回复的声音方向：
+
+```text
+sad       → 温暖轻柔
+fearful   → 安心稳定
+angry     → 冷静克制
+happy     → 轻快开心
+surprised → 惊喜好奇
+neutral   → 自然亲切
+```
+
+TTS 默认使用 `qwen3-tts-instruct-flash-realtime`，因为它支持 `instructions`，更适合做拟人化语气控制。模型与声音均可通过环境变量替换。
+
+## 重要说明
+
+第一版先打通核心实时链路，尚未恢复旧版 Admin、数据库、计费、移动 App 和 ESP32 SDK。后续会在这个新内核上重新建设，而不是把旧的 OpenAI Realtime 专用实现继续叠加进去。
+
+架构细节见 `docs/architecture.md`。

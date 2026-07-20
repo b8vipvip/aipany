@@ -1,19 +1,20 @@
 {
   "name": "aipany",
+  "version": "0.1.0",
   "private": true,
-  "version": "0.0.0",
-  "packageManager": "pnpm@10.12.1",
+  "description": "Aipany 级联实时语音网关：千问实时 ASR + OpenAI 兼容 LLM + 千问实时 TTS",
+  "workspaces": [
+    "packages/*",
+    "services/*"
+  ],
   "scripts": {
-    "build": "turbo build",
-    "dev": "turbo dev --parallel",
-    "lint": "turbo lint",
-    "test": "turbo test",
-    "typecheck": "turbo typecheck",
-    "format": "prettier --write ."
+    "build": "npm --workspace @aipany/protocol run build && npm --workspace @aipany/realtime-gateway run build",
+    "dev": "npm --workspace @aipany/protocol run build && npm --workspace @aipany/realtime-gateway run dev",
+    "start": "npm --workspace @aipany/realtime-gateway run start",
+    "test": "npm --workspace @aipany/protocol run build && npm --workspace @aipany/realtime-gateway run test",
+    "typecheck": "npm --workspace @aipany/protocol run build && npm --workspace @aipany/realtime-gateway run typecheck"
   },
-  "devDependencies": {
-    "prettier": "^3.5.3",
-    "turbo": "^2.5.4",
-    "typescript": "^5.8.3"
+  "engines": {
+    "node": ">=22"
   }
 }
