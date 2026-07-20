@@ -1,8 +1,8 @@
 {
   "name": "aipany",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "private": true,
-  "description": "Aipany 级联实时语音与 Audio Intelligence 社交语音引擎",
+  "description": "Aipany Audio Intelligence、Social Intelligence 与实时 AI 语音平台",
   "workspaces": [
     "packages/*",
     "services/*"
