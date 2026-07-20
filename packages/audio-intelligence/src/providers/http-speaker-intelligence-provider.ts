@@ -52,7 +52,7 @@ export class HttpSpeakerIntelligenceProvider implements SpeakerEmbeddingProvider
       headers: {
         "Content-Type": "application/octet-stream",
       },
-      body: audio,
+      body: Uint8Array.from(audio),
     });
 
     const payload = await response.json() as {
