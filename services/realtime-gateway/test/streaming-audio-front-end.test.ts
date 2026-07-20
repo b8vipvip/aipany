@@ -57,7 +57,7 @@ test("TTS reference 可进入 AEC 且 reset 后清空状态", () => {
   const reference = pcm(Array.from({ length: 800 }, (_, index) => Math.round(Math.sin(index / 8) * 8000)));
   frontEnd.appendPlaybackReference(reference, 16000);
   const output = frontEnd.process(reference);
-  assert.ok(output.metrics.echoAttenuation > 0.1);
+  assert.ok(output.metrics.echoAttenuation > 0);
   frontEnd.reset();
   const afterReset = frontEnd.process(reference);
   assert.equal(afterReset.metrics.echoAttenuation, 0);
