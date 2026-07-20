@@ -137,9 +137,27 @@ export interface EnrollmentState {
   updatedAt: number;
 }
 
+export interface SpeakerEmbeddingResult {
+  embedding: number[];
+  quality: number;
+  durationMs: number;
+  model?: string;
+  dimensions?: number;
+}
+
+export interface SpeakerIntelligenceCapabilities {
+  embeddings: boolean;
+  verification: boolean;
+  diarization: boolean;
+  streamingDiarization: boolean;
+  targetSpeakerExtraction: boolean;
+}
+
 export interface SpeakerEmbeddingProvider {
   readonly name: string;
-  extractEmbedding(audio: Buffer, format: AudioFormatDescriptor): Promise<number[]>;
+  extractEmbedding(audio: Buffer, format: AudioFormatDescriptor): Promise<SpeakerEmbeddingResult>;
+  getCapabilities?(): Promise<SpeakerIntelligenceCapabilities>;
+  healthCheck?(): Promise<boolean>;
 }
 
 export interface SpeakerDiarizationSegment {
