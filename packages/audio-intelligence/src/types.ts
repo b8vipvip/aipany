@@ -5,6 +5,11 @@ export type ModeChangeSource = "manual" | "voice_command" | "auto" | "suggestion
 export type SpeakerIdentityStatus = "unknown" | "learning" | "confirmed";
 export type SpeakerProximity = "very_near" | "near" | "medium" | "far" | "background" | "unknown";
 
+export interface SpeakerIdentityScope {
+  tenantId: string;
+  userId: string;
+}
+
 export interface AudioFormatDescriptor {
   encoding: "pcm_s16le" | "pcm_f32le" | "opus";
   sampleRate: number;
@@ -59,6 +64,8 @@ export interface VoiceProfile {
 
 export interface PersonRecord {
   id: string;
+  tenantId: string;
+  userId: string;
   name: string;
   relation?: string;
   isOwner: boolean;
