@@ -2,7 +2,7 @@
 
 Aipany 是面向 App、ESP32、智能音箱、AI 玩具和机器人的实时 AI 语音平台。
 
-当前第二版架构从单纯的级联实时语音升级为：
+当前第二版架构：
 
 ```text
 Audio Intelligence
@@ -20,9 +20,15 @@ Expressive Voice
 设备持续 PCM 音频
    ↓
 Aipany Realtime Gateway
+   ├─ Qwen3 Realtime ASR
+   └─ Speaker Intelligence Provider
+          ↓
+      ECAPA Speaker Embedding
+          ↓
+      Session Speaker Tracking
+          ↓
+      Voice Profile Matching
    ↓
-Qwen3 Realtime ASR
-   ↓ 文字 + 基础情绪
 Audio / Social Intelligence
    ↓
 OpenAI-compatible 中转站 LLM
@@ -34,23 +40,28 @@ Qwen3 Realtime TTS
 设备连续播放
 ```
 
-这不是传统的“录完一句再请求”。客户端保持长连接，ASR、LLM、TTS 全部流式工作，并支持用户在 AI 播放过程中插话打断。
+客户端保持长连接，ASR、LLM、TTS 全部流式工作，并支持用户在 AI 播放过程中插话打断。Speaker Intelligence 与 ASR 并行运行，声纹服务异常不会阻断正常语音对话。
 
-## v0.2 新增能力
+## v0.2 / v0.2.1 新增能力
 
 新增 `@aipany/audio-intelligence`：
 
 - `auto / owner_focus / group` 三种交互模式。
 - App/设备手动切换模式。
-- 通过自然语言直接切换模式，例如“大家一起聊吧”“只听我说话”。
+- 自然语言模式命令，例如“大家一起聊吧”“只听我说话”。
 - 多人场景自动模式建议框架。
-- 多人聊天 Social Conversation Manager，决定回答、保持安静或主动插话。
+- Social Conversation Manager：回答、保持安静或主动插话。
 - 渐进式 Voice Profile，一个人物保存多个不同环境下的声纹样本。
 - 多次样本一致后才把人物从 `learning` 提升为 `confirmed`。
 - 声纹注册、模式建议和模式切换的统一 Realtime 协议。
-- 为 Speaker Diarization、Voice Embedding、环境声音分析预留可插拔 Provider 接口。
+- 真实 HTTP Speaker Intelligence Provider。
+- SpeechBrain ECAPA-TDNN Speaker Embedding 服务。
+- 基于语音轮次 embedding 的会话级 Speaker 聚类。
+- `speaker.identified` 与 `speaker.filtered` 事件。
+- 专注模式可过滤已经可靠确认的非主人。
+- 多人模式可把 `[人物名]` 或 `[speaker_x]` 带入 LLM 对话上下文。
 
-当前千问实时 ASR 本身不提供说话人分离和声纹向量，因此 v0.2 已先完成 Audio Intelligence 领域内核、协议和 Gateway 接入。真实 Speaker Provider 将作为下一阶段模型适配器接入，不会伪造“已经能识别人”的效果。
+当前已实现真实 Speaker Embedding，但尚未实现多人同时讲话的 Speech Separation、Target Speaker Extraction 和专业 Streaming Diarization。详细边界见 `docs/SPEAKER_INTELLIGENCE.md`。
 
 ## 仓库结构
 
@@ -58,16 +69,20 @@ Qwen3 Realtime TTS
 packages/
   protocol/                    客户端与 Gateway 统一协议
   audio-intelligence/          音频智能、声纹记忆、模式和多人社交决策
+    src/providers/             Speaker Intelligence Provider 适配层
 
 services/
   realtime-gateway/            持续实时语音核心服务
     src/providers/             Qwen ASR/TTS、中转站 LLM
     src/pipeline/              情绪导演、流式文本切片
     src/session/               会话、打断和 Audio Intelligence 集成
+    src/speaker/               VAD 语音轮次声纹分析
+  speaker-intelligence/        独立声纹模型服务
 
 docs/
   architecture.md              v0.1 实时语音架构
-  DEVELOPMENT_LOG.md           持续开发记录，后续架构变化必须同步维护
+  SPEAKER_INTELLIGENCE.md      Speaker Provider 架构与能力边界
+  DEVELOPMENT_LOG.md           持续开发记录
 
 deploy/
   docker-compose.yml
@@ -75,16 +90,21 @@ deploy/
 
 ## 启动
 
-Node.js 22+：
+Node.js 22+。Speaker Intelligence 通过 Docker Compose 一起启动：
 
 ```bash
 cp .env.example .env
 # 填写 DASHSCOPE_API_KEY、LLM_API_KEY、LLM_BASE_URL、LLM_MODEL
-npm install
-npm run dev
+
+docker compose \
+  --env-file .env \
+  -f deploy/docker-compose.yml \
+  up -d --build
 ```
 
-健康检查：
+Speaker Intelligence 模型首次启动需要下载模型文件，因此第一次启动时间会更长；模型文件缓存在 Docker volume 中。
+
+Gateway 健康检查：
 
 ```bash
 curl http://127.0.0.1:3000/health
@@ -127,6 +147,37 @@ ws://127.0.0.1:3000/v1/realtime
 ```
 
 收到 `response.interrupted` 后，客户端必须立即停止播放并清空尚未播放的音频缓冲，才能实现真正的 Barge-in。
+
+## Speaker 事件
+
+识别到一个语音轮次的 Speaker 后：
+
+```json
+{
+  "type": "speaker.identified",
+  "speaker": {
+    "sessionSpeakerId": "speaker_2",
+    "personName": "小王",
+    "isOwner": false,
+    "confident": true,
+    "similarity": 0.91,
+    "observationConfidence": 0.88
+  }
+}
+```
+
+专注模式下，已经可靠确认的非主人会收到：
+
+```json
+{
+  "type": "speaker.filtered",
+  "sessionSpeakerId": "speaker_2",
+  "personName": "小王",
+  "reason": "owner_focus_non_owner"
+}
+```
+
+未知或低置信度声音不会直接被过滤，避免误伤真正的设备主人。
 
 ## 模式控制
 
