@@ -3,42 +3,52 @@ import type {
   ModeState,
   SocialDecision,
   SocialTurnContext,
+  SpeakerIdentityScope,
   SpeakerMatch,
   SpeakerObservation,
 } from "./types.js";
-import { InMemorySpeakerIdentityStore, type SpeakerIdentityStoreOptions } from "./speaker-identity-store.js";
+import {
+  InMemorySpeakerIdentityStore,
+  type SpeakerIdentityStore,
+  type SpeakerIdentityStoreOptions,
+} from "./speaker-identity-store.js";
 import { ProgressiveVoiceEnrollmentManager } from "./progressive-enrollment.js";
 import { ModeManager, type ModeManagerOptions } from "./mode-manager.js";
 import { SocialConversationManager } from "./social-conversation-manager.js";
 
 export interface AudioIntelligenceEngineOptions {
   identity?: SpeakerIdentityStoreOptions;
+  identityStore?: SpeakerIdentityStore;
+  identityScope?: SpeakerIdentityScope;
   mode?: ModeManagerOptions;
 }
 
 /**
  * Audio Intelligence Engine 是 v0.2 的领域入口。
- * 当前不绑定任何具体声纹/分离/环境模型，只接收标准化 observation，
- * 后续接 TitaNet、ECAPA、Sortformer 或商业 API 时无需修改上层会话逻辑。
+ * Speaker Identity Store 可以是内存或持久化实现；Mode / Social 状态仍按实时会话隔离。
  */
 export class AudioIntelligenceEngine {
-  readonly identities: InMemorySpeakerIdentityStore;
+  readonly identities: SpeakerIdentityStore;
+  readonly identityScope: SpeakerIdentityScope;
   readonly enrollments: ProgressiveVoiceEnrollmentManager;
   readonly modes: ModeManager;
   readonly social: SocialConversationManager;
 
   constructor(options: AudioIntelligenceEngineOptions = {}) {
-    this.identities = new InMemorySpeakerIdentityStore(options.identity);
-    this.enrollments = new ProgressiveVoiceEnrollmentManager(this.identities);
+    this.identities = options.identityStore ?? new InMemorySpeakerIdentityStore(options.identity);
+    this.identityScope = options.identityScope ?? { tenantId: "default", userId: "default" };
+    this.enrollments = new ProgressiveVoiceEnrollmentManager(this.identities, this.identityScope);
     this.modes = new ModeManager(options.mode);
     this.social = new SocialConversationManager();
   }
 
-  observeSpeaker(observation: SpeakerObservation): {
+  async observeSpeaker(observation: SpeakerObservation): Promise<{
     match?: SpeakerMatch;
     suggestion?: ReturnType<ModeManager["observeSpeaker"]>;
-  } {
-    const match = observation.embedding ? this.identities.identify(observation.embedding) : undefined;
+  }> {
+    const match = observation.embedding
+      ? await this.identities.identify(this.identityScope, observation.embedding)
+      : undefined;
     const suggestion = this.modes.observeSpeaker(observation);
     return { match, suggestion };
   }
