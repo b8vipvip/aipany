@@ -9,11 +9,14 @@ from typing import Any
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from .audio_engine import (
-    DEVICE,
-    MODEL_SOURCE,
-    AudioIntelligenceEngine,
-)
+from .audio_engine import DEVICE, MODEL_SOURCE, AudioIntelligenceEngine
+
+
+def env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 SERVICE_TOKEN = os.getenv("SPEAKER_SERVICE_TOKEN", "")
@@ -140,10 +143,11 @@ async def analyze(
             enable_separation=enable_separation,
             enable_environment=enable_environment,
             language=x_aipany_language,
-            session_id=x_aipany_session_id,
         )
         if not ENABLE_DIARIZATION:
             result["diarization"] = []
+        if x_aipany_session_id:
+            result["analysis_session_id"] = x_aipany_session_id
         return result
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -184,10 +188,3 @@ def decode_owner_embedding(value: str | None) -> list[float] | None:
         return embedding
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"invalid X-Aipany-Owner-Embedding: {exc}") from exc
-
-
-def env_bool(name: str, default: bool) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
