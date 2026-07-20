@@ -1,8 +1,8 @@
-# Aipany v0.4
+# Aipany v0.4.1
 
 Aipany 是面向 App、智能硬件和实时语音产品的 Social Voice / Audio Intelligence 平台。
 
-v0.4 将重型 Audio Intelligence 从“必须和 Gateway 部署在同一台机器”升级为混合计算架构：
+v0.4 将重型 Audio Intelligence 从“必须和 Gateway 部署在同一台机器”升级为混合计算架构；v0.4.1 新增服务端运行时配置控制台，使云端 API 与 Remote GPU 参数可以在部署完成后通过网页管理。
 
 ```text
                     Aipany Audio Intelligence
@@ -115,7 +115,8 @@ packages/
       http-remote-target-speaker-provider.ts
 
 services/
-  realtime-gateway/               实时会话编排
+  realtime-gateway/
+    src/admin/                    服务端运行时配置控制台
   speaker-intelligence/           本地 ECAPA / Diarization / 可选重模型
 
 deploy/
@@ -132,7 +133,7 @@ docs/
 
 - Node.js 22+；
 - Docker Compose；
-- 阿里云百炼 API Key；
+- 阿里云百炼账号；
 - 一个 OpenAI-compatible LLM API。
 
 复制环境变量：
@@ -141,24 +142,82 @@ docs/
 cp .env.example .env
 ```
 
-至少填写：
+v0.4.1 中，DashScope、Qwen Omni、LLM 和 Remote GPU 的运行时参数可以先留空，Gateway 仍可启动，之后进入：
 
 ```text
-DASHSCOPE_API_KEY
-LLM_BASE_URL
-LLM_API_KEY
-LLM_MODEL
+https://your-domain/admin/config
 ```
 
-生产环境建议同时配置：
+在页面中填写。
+
+生产环境仍必须在 `.env` 配置启动级参数：
 
 ```text
+AIPANY_ADMIN_TOKEN
 AIPANY_JWT_SECRET
 SPEAKER_IDENTITY_STORE=postgres
 DATABASE_URL
 POSTGRES_PASSWORD
 SPEAKER_IDENTITY_ENCRYPTION_KEY
 ```
+
+推荐生成管理 Token：
+
+```bash
+openssl rand -hex 32
+```
+
+## 服务端运行时配置控制台
+
+管理页面：
+
+```text
+GET /admin/config
+```
+
+管理 API：
+
+```text
+GET /admin/api/config
+PUT /admin/api/config
+```
+
+管理 API 使用：
+
+```text
+Authorization: Bearer <AIPANY_ADMIN_TOKEN>
+```
+
+可管理：
+
+- DashScope API Key / Workspace / ASR / TTS；
+- Qwen Omni Cloud Audio；
+- OpenAI-compatible LLM；
+- Remote GPU / SepFormer Worker；
+- Cloud Intelligence 与 Remote Separation 开关。
+
+安全和运行规则：
+
+1. 管理 Token 只来自服务器 `.env`，不会由页面生成或读取；
+2. API 密钥读取接口只返回“是否已配置”，不会把已保存的明文密钥返回浏览器；
+3. 密码输入框留空表示保留已有值；
+4. 运行时配置保存在独立 Docker Volume 中，文件权限为 `0600`；
+5. 保存后新建立的 WebSocket 连接使用最新配置，不需要重新构建 Docker 镜像；
+6. 数据库密码、JWT、声纹加密密钥等启动级秘密不允许通过该页面修改。
+
+默认持久化位置：
+
+```text
+/data/runtime-api-config.json
+```
+
+可通过：
+
+```text
+AIPANY_RUNTIME_CONFIG_PATH
+```
+
+覆盖。
 
 ## v0.4 Cloud Intelligence
 
@@ -208,7 +267,7 @@ AUDIO_SEGMENT_TRANSCRIPTION_ENABLED=true
 
 ## Remote SepFormer
 
-准备好 GPU Worker 后配置：
+准备好 GPU Worker 后可以直接在 `/admin/config` 配置，也可以继续使用环境变量：
 
 ```text
 REMOTE_SEPARATION_ENABLED=true
@@ -240,6 +299,7 @@ Gateway：
 
 ```text
 GET http://127.0.0.1:3000/health
+GET http://127.0.0.1:3000/admin/config
 WS  ws://127.0.0.1:3000/v1/realtime
 ```
 
@@ -247,6 +307,7 @@ WS  ws://127.0.0.1:3000/v1/realtime
 
 ```text
 https://your-domain/health
+https://your-domain/admin/config
 wss://your-domain/v1/realtime
 ```
 

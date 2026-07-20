@@ -1,20 +1,22 @@
 import { z } from "zod";
 
 const booleanString = z.enum(["true", "false"]).transform((value) => value === "true");
+const optionalString = z.preprocess((value) => value === "" ? undefined : value, z.string().optional());
+const optionalUrl = z.preprocess((value) => value === "" ? undefined : value, z.string().url().optional());
 
 const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(3000),
   HOST: z.string().default("0.0.0.0"),
-  AIPANY_GATEWAY_TOKEN: z.string().optional(),
-  AIPANY_JWT_SECRET: z.string().optional(),
-  AIPANY_JWT_ISSUER: z.string().optional(),
-  AIPANY_JWT_AUDIENCE: z.string().optional(),
+  AIPANY_GATEWAY_TOKEN: optionalString,
+  AIPANY_JWT_SECRET: optionalString,
+  AIPANY_JWT_ISSUER: optionalString,
+  AIPANY_JWT_AUDIENCE: optionalString,
   AIPANY_ALLOW_ANONYMOUS: booleanString.default("false"),
 
-  DASHSCOPE_API_KEY: z.string().min(1),
-  DASHSCOPE_WORKSPACE_ID: z.string().optional(),
-  DASHSCOPE_ASR_WS_BASE_URL: z.string().url().optional(),
-  DASHSCOPE_TTS_WS_BASE_URL: z.string().url().optional(),
+  DASHSCOPE_API_KEY: z.string().default(""),
+  DASHSCOPE_WORKSPACE_ID: optionalString,
+  DASHSCOPE_ASR_WS_BASE_URL: optionalUrl,
+  DASHSCOPE_TTS_WS_BASE_URL: optionalUrl,
 
   QWEN_ASR_MODEL: z.string().default("qwen3-asr-flash-realtime"),
   QWEN_ASR_LANGUAGE: z.string().default("zh"),
@@ -27,15 +29,15 @@ const envSchema = z.object({
   QWEN_TTS_SAMPLE_RATE: z.coerce.number().int().default(24000),
   QWEN_TTS_OPTIMIZE_INSTRUCTIONS: booleanString.default("false"),
 
-  LLM_BASE_URL: z.string().url(),
-  LLM_API_KEY: z.string().min(1),
-  LLM_MODEL: z.string().min(1),
+  LLM_BASE_URL: z.string().url().default("https://api.openai.com/v1"),
+  LLM_API_KEY: z.string().default(""),
+  LLM_MODEL: z.string().default("gpt-5.6-sol"),
   LLM_TEMPERATURE: z.coerce.number().min(0).max(2).default(0.8),
   LLM_MAX_TOKENS: z.coerce.number().int().positive().default(800),
 
   SPEAKER_INTELLIGENCE_ENABLED: booleanString.default("false"),
   SPEAKER_INTELLIGENCE_BASE_URL: z.string().url().default("http://speaker-intelligence:3200"),
-  SPEAKER_INTELLIGENCE_TOKEN: z.string().optional(),
+  SPEAKER_INTELLIGENCE_TOKEN: optionalString,
   SPEAKER_INTELLIGENCE_TIMEOUT_MS: z.coerce.number().int().min(300).max(30000).default(2500),
   SPEAKER_INTELLIGENCE_ANALYSIS_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120000).default(20000),
   SPEAKER_MIN_AUDIO_MS: z.coerce.number().int().min(300).max(10000).default(700),
@@ -61,8 +63,8 @@ const envSchema = z.object({
   AUDIO_FRONTEND_METRICS_INTERVAL_MS: z.coerce.number().int().min(0).max(60000).default(5000),
 
   SPEAKER_IDENTITY_STORE: z.enum(["memory", "postgres"]).default("memory"),
-  DATABASE_URL: z.string().optional(),
-  SPEAKER_IDENTITY_ENCRYPTION_KEY: z.string().optional(),
+  DATABASE_URL: optionalString,
+  SPEAKER_IDENTITY_ENCRYPTION_KEY: optionalString,
   SPEAKER_IDENTITY_DATABASE_SSL: booleanString.default("false"),
   SPEAKER_IDENTITY_DB_POOL_MAX: z.coerce.number().int().min(1).max(100).default(10),
   SPEAKER_IDENTITY_MATCH_CANDIDATES: z.coerce.number().int().min(1).max(100).default(20),

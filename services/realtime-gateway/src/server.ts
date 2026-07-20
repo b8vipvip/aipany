@@ -7,29 +7,53 @@ import {
   type SpeakerIdentityStore,
 } from "@aipany/audio-intelligence";
 import { clientControlEventSchema } from "@aipany/protocol";
+import { handleAdminConfigHttp } from "./admin/admin-config-http.js";
+import { RuntimeApiConfigStore } from "./admin/runtime-api-config-store.js";
 import { authenticateRequest, type AuthContext } from "./auth.js";
-import type { AppConfig } from "./config.js";
+import { loadConfig, type AppConfig } from "./config.js";
 import { RealtimeSession } from "./session/realtime-session.js";
 
-export function createGatewayServer(config: AppConfig) {
+export function createGatewayServer(
+  config: AppConfig,
+  runtimeApiConfigStore = new RuntimeApiConfigStore({
+    filePath: process.env.AIPANY_RUNTIME_CONFIG_PATH,
+    adminToken: process.env.AIPANY_ADMIN_TOKEN,
+  }),
+) {
   const identityStore = createSpeakerIdentityStore(config);
   const authContexts = new WeakMap<IncomingMessage, AuthContext>();
-  const httpServer = createServer((request, response) => {
-    const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
-    if (request.method === "GET" && url.pathname === "/health") {
-      response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      response.end(JSON.stringify({
-        ok: true,
-        service: "aipany-realtime-gateway",
-        version: "0.4.0",
-        speakerIdentityStore: config.speakerIdentity.store,
-        audioFrontEnd: config.audioFrontEnd.enabled,
-        auth: config.server.auth.jwtSecret ? "jwt" : config.server.auth.legacyToken ? "legacy_token" : "development_open",
-      }));
-      return;
+  const httpServer = createServer(async (request, response) => {
+    try {
+      if (await handleAdminConfigHttp(request, response, runtimeApiConfigStore)) return;
+      const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+      if (request.method === "GET" && url.pathname === "/health") {
+        const snapshot = runtimeApiConfigStore.snapshot();
+        response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        response.end(JSON.stringify({
+          ok: true,
+          service: "aipany-realtime-gateway",
+          version: "0.4.1",
+          speakerIdentityStore: config.speakerIdentity.store,
+          audioFrontEnd: config.audioFrontEnd.enabled,
+          runtimeApiConfig: {
+            enabled: snapshot.enabled,
+            dashscopeConfigured: Boolean(snapshot.secrets.DASHSCOPE_API_KEY?.configured),
+            llmConfigured: Boolean(snapshot.secrets.LLM_API_KEY?.configured),
+          },
+          auth: config.server.auth.jwtSecret ? "jwt" : config.server.auth.legacyToken ? "legacy_token" : "development_open",
+        }));
+        return;
+      }
+      response.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify({ error: "not_found" }));
+    } catch (error) {
+      if (response.headersSent) {
+        response.end();
+        return;
+      }
+      response.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify({ error: "internal_error", message: error instanceof Error ? error.message : String(error) }));
     }
-    response.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
-    response.end(JSON.stringify({ error: "not_found" }));
   });
 
   const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
@@ -59,7 +83,15 @@ export function createGatewayServer(config: AppConfig) {
       legacy: false,
       scopes: new Set(["*"]),
     };
-    const session = new RealtimeSession(ws, config, identityStore, authContext);
+    let sessionConfig: AppConfig;
+    try {
+      sessionConfig = loadConfig();
+    } catch (error) {
+      sendError(ws, "RUNTIME_CONFIG_INVALID", error instanceof Error ? error.message : String(error));
+      ws.close(1011, "runtime config invalid");
+      return;
+    }
+    const session = new RealtimeSession(ws, sessionConfig, identityStore, authContext);
     let initialized = false;
 
     ws.on("message", (raw, isBinary) => {
