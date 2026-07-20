@@ -1,218 +1,288 @@
-# Aipany Speaker Intelligence
+# Aipany Speaker / Audio Intelligence
 
-## 当前实现
+## 当前实现：v0.3
 
-Aipany v0.2.2 的 Speaker Intelligence 主链路：
-
-```text
-客户端 PCM 16k
-↓
-Qwen Server VAD
-↓
-UtteranceSpeakerAnalyzer
-├─ 350ms pre-roll
-├─ 单轮语音缓存
-└─ 最小时长过滤
-↓
-HTTP Speaker Intelligence Provider
-↓
-SpeechBrain ECAPA-TDNN
-↓
-Speaker Embedding
-↓
-SessionSpeakerTracker
-↓
-speaker_1 / speaker_2 / speaker_3
-↓
-AudioIntelligenceEngine
-↓
-SpeakerIdentityStore
-├─ InMemory
-└─ PostgreSQL + pgvector + encrypted embeddings
-↓
-Realtime Session / Mode Manager / Enrollment
-```
-
-## Utterance-level Speaker Embedding
-
-当前 Qwen Realtime ASR 提供 VAD 和转写，但不直接提供 Aipany 所需的 Speaker Diarization / Voice Embedding。
-
-第一阶段利用 Server VAD 切出的单轮语音，把满足最小时长要求的 PCM 送到独立 Speaker Intelligence 服务提取 embedding。
-
-当前已经支持：
-
-- 同一会话内区分轮流讲话的不同人；
-- 未知说话人稳定映射为 `speaker_1 / speaker_2 / ...`；
-- Progressive Voice Enrollment；
-- 已确认 Voice Profile 的跨会话人物匹配；
-- 专注模式过滤已可靠确认的非主人；
-- 多人模式将说话人标签带入 LLM 上下文。
-
-## Speaker Intelligence 模型服务
-
-目录：
+Aipany 的 Speaker Intelligence 已经从“单轮 ECAPA embedding”升级为完整的 Audio Intelligence 分析服务。
 
 ```text
-services/speaker-intelligence/
+客户端 PCM 16k（1-8 ch）
+        │
+        ▼
+StreamingAudioFrontEnd
+├─ Beamforming Raw Mono ───────────────────────────────┐
+└─ AEC / NS / AGC / Dereverb ──→ Qwen Realtime ASR   │
+                                                       ▼
+                                         Audio Intelligence Service
+                                         ├─ ECAPA Speaker Embedding
+                                         ├─ Online Diarization
+                                         ├─ SepFormer Separation
+                                         ├─ Overlap Detection
+                                         ├─ Target Speaker Extraction
+                                         ├─ faster-whisper Segment ASR
+                                         └─ AudioSet AST Environment AI
+                                                       │
+                                                       ▼
+                                           SessionSpeakerTracker
+                                                       │
+                                                       ▼
+                                             Identity / Mode / Social
 ```
 
-当前默认模型：
+## Speaker Embedding
+
+默认：
 
 ```text
 speechbrain/spkrec-ecapa-voxceleb
 ```
 
-接口：
+ECAPA 在服务启动时加载，是 Speaker Identity 的基础能力。
+
+用途：
+
+- 会话内说话人聚类；
+- 长期 Person Voice Profile 匹配；
+- Progressive Enrollment；
+- 分离音轨身份判断；
+- Owner Target Speaker Extraction。
+
+## Online Diarization
+
+每个 Server VAD 语音轮次内部继续切分有效语音区域，然后以滑动时间窗提取 embedding 并在线聚类。
+
+```text
+VAD Utterance
+↓
+Speech Regions
+↓
+Sliding ECAPA Windows
+↓
+Online Clustering
+↓
+Per-speaker Segments
+```
+
+Gateway 使用 `SessionSpeakerTracker` 把模型服务返回的轮次内 Speaker 映射为跨轮次稳定的：
+
+```text
+speaker_1
+speaker_2
+speaker_3
+```
+
+因此系统可以处理：
+
+```text
+A 说话 → B 说话 → A 再说话
+```
+
+也可以在一个较长 VAD 轮次内部输出多个 Speaker Segment。
+
+## Overlap Detection / Speech Separation
+
+默认可选模型：
+
+```text
+speechbrain/sepformer-wsj02mix
+```
+
+处理流程：
+
+```text
+Mixed Audio
+↓
+SepFormer
+↓
+Source Tracks
+↓
+Energy Validation
+↓
+Per-source ECAPA
+↓
+Distinct Speaker Check
+↓
+Overlap Detected
+```
+
+如果增强模型加载失败，系统退回普通 diarization，不影响核心语音对话。
+
+当前默认 SepFormer 是双源分离模型，主要解决常见“两个人同时说话”场景；更复杂的 3+ 人完全重叠仍属于未来可替换 Provider 的能力边界。
+
+## Target Speaker Extraction
+
+当 `owner_focus` 模式存在已确认 Owner Voice Profile 时：
+
+```text
+Mixed Audio
++
+Owner centroid
+↓
+Separated Sources
+↓
+Cosine Similarity
+↓
+Best Owner Track
+↓
+Independent Transcript
+```
+
+只有匹配达到阈值时才把目标音轨 transcript 送给 Conversation Brain。
+
+匹配不可靠时保守过滤，避免把旁人内容当成主人命令。
+
+## Group Transcript
+
+多人模式可以输出：
+
+```text
+transcript.group
+```
+
+每个 segment 包含：
+
+- 时间范围；
+- Speaker Attribution；
+- transcript；
+- overlap；
+- confidence。
+
+进入 LLM 历史的文本可以是：
+
+```text
+[主人] 明天八点出发吧
+[小王] 会不会太早
+[小李] 机场比较远
+```
+
+分段转写默认使用 `faster-whisper`，加载失败时退回 Qwen 主转写。
+
+## Environment Intelligence
+
+默认模型：
+
+```text
+MIT/ast-finetuned-audioset-10-10-0.4593
+```
+
+输出：
+
+- scene；
+- sceneConfidence；
+- noiseLevel；
+- environment events。
+
+模型不可用时使用轻量音频能量分析作为 fallback。
+
+环境事件属于概率信号。系统只会在高置信度安全风险事件下提升 Social Manager 的 urgency，不会把普通低置信度分类直接当成事实。
+
+## Audio Front-End 双支路
+
+设计继续遵守：
+
+```text
+原始/波束合成音频 → Environment / Speaker Intelligence
+增强音频          → ASR
+```
+
+原因：
+
+- Noise Suppression 可能删除键盘、交通、施工等环境线索；
+- AEC/AGC 后音频更适合 ASR；
+- 声纹和环境模型应该尽量看到更接近原始声场的信号。
+
+服务端当前包含：
+
+- Delay-and-Sum Beamforming；
+- AEC；
+- Noise Suppression；
+- AGC；
+- Dereverb；
+- Soft Limiter。
+
+支持本地 WebRTC APM / 硬件 DSP 的设备仍建议优先设备侧处理。
+
+## Speaker Identity Privacy
+
+长期声纹默认要求：
+
+```text
+speaker.consent.grant
+```
+
+未授权时：
+
+- 不做长期人物识别；
+- 不允许 Enrollment；
+- 仍允许匿名 Session Speaker 跟踪；
+- 普通语音对话继续工作。
+
+撤销授权可以同时删除所有已保存身份。
+
+PostgreSQL 保存：
+
+```text
+persons
+speaker_profiles
+speaker_samples
+speaker_consents
+speaker_audit_log
+```
+
+不默认保存原始注册音频。
+
+## 加密和 Key Rotation
+
+canonical embedding 使用 AES-256-GCM。
+
+v0.3 keyring 密文带 key id：
+
+```text
+active encryption key → 新数据
+historical keys       → 旧数据解密
+stable search key     → pgvector keyed projection
+```
+
+因此数据加密 key 可以轮换，而 pgvector 搜索空间保持稳定。
+
+历史数据重加密：
+
+```bash
+npm --workspace @aipany/realtime-gateway run speaker:rotate-keys
+```
+
+## API
+
+模型服务：
 
 ```text
 GET  /health
 GET  /v1/capabilities
 POST /v1/embedding
+POST /v1/analyze
 ```
 
-Gateway 通过：
+`/v1/analyze` 一次语音轮次可以同时返回：
+
+- utterance embedding；
+- quality / proximity；
+- diarization segments；
+- overlapDetected；
+- separated speaker transcripts；
+- targetSpeaker；
+- environment context。
+
+Gateway 始终通过 Provider 接口访问模型服务，不直接耦合 SpeechBrain、Whisper 或 Transformers。
+
+## 容错
+
+Audio Intelligence 是增强层，不是核心语音链路单点故障：
 
 ```text
-packages/audio-intelligence/src/providers/http-speaker-intelligence-provider.ts
+模型服务异常
+↓
+Speaker / Environment 能力降级
+↓
+ASR → LLM → TTS 继续运行
 ```
 
-访问该服务，因此未来替换 NeMo、商业 API、自建 GPU 服务时，不需要重写上层身份和多人业务语义。
-
-## 实时延迟与容错
-
-声纹分析和 ASR 并行：
-
-```text
-speech_stopped
-├─ ASR Final
-└─ Speaker Embedding
-   ↓
-   Identity Store
-```
-
-Realtime Session 最多等待 `SPEAKER_ANALYSIS_WAIT_MS` 获取人物归属。
-
-若 Speaker Intelligence 或持久化 Identity Store 暂时失败：
-
-- ASR → LLM → TTS 主链路继续；
-- 当前轮次可能没有人物 Attribution；
-- 客户端会收到可重试错误；
-- 不因为增强能力故障中断基本语音聊天。
-
-## Identity Store 生命周期
-
-v0.2.1 的 Store 跟随单个 `RealtimeSession` 创建，无法真正跨会话记住人物。
-
-v0.2.2 改为 Gateway 级共享 Store：
-
-```text
-Gateway
-↓
-Shared SpeakerIdentityStore
-├─ Session A: tenant-a / user-1
-├─ Session B: tenant-a / user-1
-└─ Session C: tenant-b / user-8
-```
-
-Mode、Social 和 Enrollment 状态仍属于各自实时会话；长期人物身份数据由共享 Store 管理。
-
-## Speaker Identity Persistence
-
-启用 PostgreSQL 后：
-
-```text
-Person
-↓
-Voice Profile
-↓
-Voice Samples
-```
-
-长期保存：
-
-- 人物名称和关系；
-- Owner 标记；
-- Profile 状态和置信度；
-- 加密 centroid；
-- 加密 sample embeddings；
-- 样本质量；
-- 环境标签；
-- 相对距离；
-- 来源会话。
-
-不默认保存：
-
-- 原始注册录音；
-- 整段实时会话音频。
-
-完整设计见 `docs/SPEAKER_IDENTITY_PERSISTENCE.md`。
-
-## 专注模式过滤规则
-
-当前采用保守策略：
-
-```text
-已确认人物
-+
-Voice Profile 匹配达到阈值
-+
-该人物明确不是 Owner
-↓
-过滤，不进入 LLM
-```
-
-未知声音和低置信度声音不会直接丢弃，避免把真正主人误过滤。
-
-后续 Target Speaker Extraction 完成后，专注模式可从“识别后过滤”升级为“直接从混合声音中提取主人音轨”。
-
-## 当前不能解决的场景
-
-### 多人同时讲话
-
-单个 VAD utterance 可能包含多个重叠声音。一个整体 embedding 无法可靠代表其中每个人。
-
-需要：
-
-```text
-Overlap Detection
-↓
-Speech Separation / Target Speaker Extraction
-↓
-Per-speaker Audio Track
-↓
-Per-speaker ASR + Embedding
-```
-
-### 真正 Streaming Diarization
-
-当前 `SessionSpeakerTracker` 是基于每个完整语音轮次 embedding 的在线聚类，不等价于专业 Streaming Diarization。
-
-未来会接入能够持续输出：
-
-```text
-speaker A: 0.0s - 2.7s
-speaker B: 2.8s - 5.2s
-speaker A: 5.3s - 7.1s
-```
-
-的独立 Provider，并继续复用 `SpeakerObservation` 和身份记忆层。
-
-## 数据安全
-
-Speaker Embedding 属于敏感生物识别特征。
-
-v0.2.2 已完成：
-
-- canonical embedding AES-256-GCM 应用层加密；
-- tenantId + userId Store 层隔离；
-- AAD 绑定身份作用域；
-- 不默认保存原始录音；
-- 删除 Person 时级联删除 Profile / Samples；
-- pgvector 不直接保存 canonical embedding。
-
-仍需后续补齐：
-
-- 正式 IAM，把 tenant/user 身份和可信认证凭证绑定；
-- keyring 和密钥轮换；
-- 数据访问与删除审计；
-- 更完整的用户授权和撤销 UX。
+这条原则后续替换为 GPU 集群、NeMo、商业 API 或自研模型时继续保持。
