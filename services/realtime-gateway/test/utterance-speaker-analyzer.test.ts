@@ -25,11 +25,11 @@ test("同类语音轮次得到稳定的会话 Speaker ID", async () => {
   });
 
   analyzer.startSpeech();
-  analyzer.append(Buffer.from([1, 1, 1, 1]));
+  analyzer.append(Buffer.alloc(64, 1));
   const first = await analyzer.stopSpeech();
 
   analyzer.startSpeech();
-  analyzer.append(Buffer.from([1, 2, 3, 4]));
+  analyzer.append(Buffer.alloc(64, 1));
   const second = await analyzer.stopSpeech();
 
   assert.ok(first);
