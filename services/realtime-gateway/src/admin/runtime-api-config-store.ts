@@ -141,6 +141,8 @@ export class RuntimeApiConfigStore {
 
   private apply(): void {
     for (const [key, value] of Object.entries(this.values)) process.env[key] = value;
+    if (this.llmProviderPool) process.env.LLM_PROVIDER_POOL_JSON = JSON.stringify(this.llmProviderPool);
+    else delete process.env.LLM_PROVIDER_POOL_JSON;
   }
 
   private async persist(): Promise<void> {
