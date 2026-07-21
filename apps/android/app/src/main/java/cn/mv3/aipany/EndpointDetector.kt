@@ -38,7 +38,10 @@ class EndpointDetector(
         if (!speaking) {
             if (cooldownFrames > 0) cooldownFrames--
 
-            val startMargin = if (assistantSpeaking) 16f else 10f
+            // Speaker playback can leak into the microphone even with platform AEC.
+            // Require a much stronger rise above the learned noise floor while the
+            // assistant is speaking so moderate echo does not trigger false barge-in.
+            val startMargin = if (assistantSpeaking) 20f else 10f
             val startThreshold = max(-42f, noiseFloorDbfs + startMargin)
             val likelySpeech = dbfs > startThreshold && dbfs > -55f
 
