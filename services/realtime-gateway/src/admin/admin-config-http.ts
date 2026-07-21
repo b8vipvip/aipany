@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { ADMIN_CONFIG_PAGE } from "./admin-config-page.js";
 import { RuntimeApiConfigStore } from "./runtime-api-config-store.js";
+import { llmProtocolSchema, testLlmRoute } from "../providers/llm-provider-pool.js";
 
 export async function handleAdminConfigHttp(
   request: IncomingMessage,
@@ -45,7 +46,7 @@ export async function handleAdminConfigHttp(
 
   if (request.method === "PUT" && url.pathname === "/admin/api/config") {
     try {
-      const payload = await readJsonBody(request, 256 * 1024);
+      const payload = await readJsonBody(request, 512 * 1024);
       const result = await store.update(payload);
       response.writeHead(200);
       response.end(JSON.stringify(result));
@@ -56,7 +57,35 @@ export async function handleAdminConfigHttp(
     return true;
   }
 
-  response.writeHead(405, { Allow: "GET, PUT" });
+  if (request.method === "POST" && url.pathname === "/admin/api/config/llm-test") {
+    try {
+      const payload = await readJsonBody(request, 64 * 1024);
+      const providerId = requireString(payload.providerId, "providerId");
+      const modelId = requireString(payload.modelId, "modelId");
+      const protocol = llmProtocolSchema.parse(payload.protocol);
+      const pool = store.getLlmProviderPool();
+      const provider = pool.providers.find((item) => item.id === providerId);
+      if (!provider) throw new Error(`未找到 LLM Provider：${providerId}`);
+      const model = provider.models.find((item) => item.id === modelId);
+      if (!model) throw new Error(`未找到模型：${modelId}`);
+      if (!model.protocols.includes(protocol)) throw new Error(`模型 ${modelId} 未启用协议 ${protocol}`);
+      const result = await testLlmRoute({
+        provider,
+        model,
+        protocol,
+        firstTokenTimeoutMs: provider.firstTokenTimeoutMs ?? pool.firstTokenTimeoutMs,
+        totalTimeoutMs: provider.totalTimeoutMs ?? pool.totalTimeoutMs,
+      });
+      response.writeHead(200);
+      response.end(JSON.stringify({ ok: true, ...result }));
+    } catch (error) {
+      response.writeHead(400);
+      response.end(JSON.stringify({ error: "llm_test_failed", message: error instanceof Error ? error.message : String(error) }));
+    }
+    return true;
+  }
+
+  response.writeHead(405, { Allow: "GET, PUT, POST" });
   response.end(JSON.stringify({ error: "method_not_allowed" }));
   return true;
 }
@@ -81,4 +110,9 @@ async function readJsonBody(request: IncomingMessage, limit: number): Promise<Re
   const parsed = JSON.parse(text) as unknown;
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("请求体必须是 JSON 对象");
   return parsed as Record<string, unknown>;
+}
+
+function requireString(value: unknown, name: string): string {
+  if (typeof value !== "string" || !value.trim()) throw new Error(`${name} 不能为空`);
+  return value.trim();
 }

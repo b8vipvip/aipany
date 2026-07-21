@@ -28,17 +28,21 @@ export function createGatewayServer(
       const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
       if (request.method === "GET" && url.pathname === "/health") {
         const snapshot = runtimeApiConfigStore.snapshot();
+        const enabledLlmProviders = snapshot.llmProviderPool.providers.filter((provider) =>
+          provider.enabled && provider.apiKeyConfigured && provider.models.some((model) => model.enabled),
+        );
         response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
         response.end(JSON.stringify({
           ok: true,
           service: "aipany-realtime-gateway",
-          version: "0.4.1",
+          version: "0.4.2",
           speakerIdentityStore: config.speakerIdentity.store,
           audioFrontEnd: config.audioFrontEnd.enabled,
           runtimeApiConfig: {
             enabled: snapshot.enabled,
             dashscopeConfigured: Boolean(snapshot.secrets.DASHSCOPE_API_KEY?.configured),
-            llmConfigured: Boolean(snapshot.secrets.LLM_API_KEY?.configured),
+            llmConfigured: enabledLlmProviders.length > 0,
+            llmProviderCount: enabledLlmProviders.length,
           },
           auth: config.server.auth.jwtSecret ? "jwt" : config.server.auth.legacyToken ? "legacy_token" : "development_open",
         }));
