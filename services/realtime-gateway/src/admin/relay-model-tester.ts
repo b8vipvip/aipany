@@ -276,7 +276,7 @@ async function mapWithConcurrency<T, R>(items: T[], concurrency: number, mapper:
     while (true) {
       const index = cursor++;
       if (index >= items.length) return;
-      output[index] = await mapper(items[index]);
+      output[index] = await mapper(items[index]!);
     }
   });
   await Promise.all(workers);
