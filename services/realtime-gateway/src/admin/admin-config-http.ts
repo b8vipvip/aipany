@@ -1,10 +1,12 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { ADMIN_CONFIG_PAGE } from "./admin-config-page.js";
 import { ADMIN_FAILOVER_UI } from "./admin-failover-ui.js";
+import { ADMIN_OBSERVABILITY_UI } from "./admin-observability-ui.js";
 import { decryptConfigBackup, encryptConfigBackup } from "./config-backup.js";
 import { runAdminE2eTest } from "./e2e-test-runner.js";
 import { benchmarkRelayProvider } from "./relay-model-tester.js";
 import { RuntimeApiConfigStore } from "./runtime-api-config-store.js";
+import type { RealtimeObservabilityStore } from "../observability/realtime-observability.js";
 import {
   getLlmRoutingSnapshot,
   llmProtocolSchema,
@@ -16,8 +18,15 @@ export async function handleAdminConfigHttp(
   request: IncomingMessage,
   response: ServerResponse,
   store: RuntimeApiConfigStore,
+  observability?: RealtimeObservabilityStore,
 ): Promise<boolean> {
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+
+  if (request.method === "GET" && (url.pathname === "/admin" || url.pathname === "/admin/")) {
+    response.writeHead(302, { Location: "/admin/config/quality", "Cache-Control": "no-store" });
+    response.end();
+    return true;
+  }
 
   if (request.method === "GET" && url.pathname === "/admin/failover-ui.js") {
     response.writeHead(200, {
@@ -29,6 +38,16 @@ export async function handleAdminConfigHttp(
     return true;
   }
 
+  if (request.method === "GET" && url.pathname === "/admin/observability-ui.js") {
+    response.writeHead(200, {
+      "Content-Type": "application/javascript; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+    });
+    response.end(ADMIN_OBSERVABILITY_UI);
+    return true;
+  }
+
   if (request.method === "GET" && (url.pathname === "/admin/config" || url.pathname.startsWith("/admin/config/"))) {
     response.writeHead(200, {
       "Content-Type": "text/html; charset=utf-8",
@@ -36,11 +55,16 @@ export async function handleAdminConfigHttp(
       "X-Frame-Options": "DENY",
       "Content-Security-Policy": "default-src 'self'; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'",
     });
-    response.end(ADMIN_CONFIG_PAGE.replace("</body>", '<script src="/admin/failover-ui.js"></script></body>'));
+    response.end(ADMIN_CONFIG_PAGE.replace(
+      "</body>",
+      '<script src="/admin/failover-ui.js"></script><script src="/admin/observability-ui.js"></script></body>',
+    ));
     return true;
   }
 
-  if (!url.pathname.startsWith("/admin/api/config")) return false;
+  const isConfigApi = url.pathname.startsWith("/admin/api/config");
+  const isObservabilityApi = url.pathname.startsWith("/admin/api/observability");
+  if (!isConfigApi && !isObservabilityApi) return false;
   response.setHeader("Cache-Control", "no-store");
   response.setHeader("Content-Type", "application/json; charset=utf-8");
 
@@ -54,6 +78,60 @@ export async function handleAdminConfigHttp(
   if (!store.authenticate(token)) {
     response.writeHead(401, { "WWW-Authenticate": "Bearer" });
     response.end(JSON.stringify({ error: "unauthorized" }));
+    return true;
+  }
+
+  if (isObservabilityApi) {
+    if (!observability) {
+      response.writeHead(503);
+      response.end(JSON.stringify({ error: "observability_unavailable" }));
+      return true;
+    }
+
+    if (request.method === "GET" && url.pathname === "/admin/api/observability/overview") {
+      response.writeHead(200);
+      response.end(JSON.stringify(observability.overview()));
+      return true;
+    }
+
+    if (request.method === "GET" && url.pathname === "/admin/api/observability/sessions") {
+      const limit = parseLimit(url.searchParams.get("limit"), 100, 500);
+      response.writeHead(200);
+      response.end(JSON.stringify({ sessions: observability.listSessions(limit) }));
+      return true;
+    }
+
+    if (request.method === "GET" && url.pathname === "/admin/api/observability/events") {
+      const limit = parseLimit(url.searchParams.get("limit"), 200, 1000);
+      response.writeHead(200);
+      response.end(JSON.stringify({
+        events: observability.listEvents({
+          limit,
+          level: url.searchParams.get("level") || undefined,
+          category: url.searchParams.get("category") || undefined,
+          sessionId: url.searchParams.get("sessionId") || undefined,
+          query: url.searchParams.get("q") || undefined,
+        }),
+      }));
+      return true;
+    }
+
+    if (request.method === "GET" && url.pathname === "/admin/api/observability/export") {
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      response.writeHead(200, {
+        "Content-Disposition": `attachment; filename="aipany-observability-${stamp}.json"`,
+      });
+      response.end(JSON.stringify({
+        exportedAt: Date.now(),
+        overview: observability.overview(),
+        sessions: observability.listSessions(500),
+        events: observability.listEvents({ limit: 1000 }),
+      }, null, 2));
+      return true;
+    }
+
+    response.writeHead(405, { Allow: "GET" });
+    response.end(JSON.stringify({ error: "method_not_allowed" }));
     return true;
   }
 
@@ -236,6 +314,11 @@ function requireStringArray(value: unknown, name: string): string[] {
   const output = value.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim());
   if (!output.length) throw new Error(`请至少选择一个${name === "providerIds" ? "中转站" : name}`);
   return [...new Set(output)];
+}
+
+function parseLimit(raw: string | null, fallback: number, maximum: number): number {
+  const value = raw ? Number(raw) : fallback;
+  return Number.isFinite(value) ? Math.max(1, Math.min(maximum, Math.round(value))) : fallback;
 }
 
 function formatError(error: unknown): string {
