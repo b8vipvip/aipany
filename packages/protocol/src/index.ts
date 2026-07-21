@@ -30,6 +30,7 @@ export const sessionStartEventSchema = z.object({
     systemPrompt: z.string().optional(),
     interactionMode: interactionModeSchema.default("auto"),
     socialProactivity: z.number().min(0).max(1).default(0.45),
+    outputVoice: z.string().trim().min(1).max(80).optional(),
     inputAudio: inputAudioSchema.default({ encoding: "pcm_s16le", sampleRate: 16000, channels: 1 }),
     device: deviceSchema,
   }),
