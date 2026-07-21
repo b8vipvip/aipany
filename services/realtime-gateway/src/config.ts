@@ -12,6 +12,9 @@ const envSchema = z.object({
   AIPANY_JWT_ISSUER: optionalString,
   AIPANY_JWT_AUDIENCE: optionalString,
   AIPANY_ALLOW_ANONYMOUS: booleanString.default("false"),
+  AIPANY_MOBILE_PREVIEW_ENABLED: booleanString.default("false"),
+  AIPANY_MOBILE_PREVIEW_TOKEN_TTL_SECONDS: z.coerce.number().int().min(300).max(86400).default(21600),
+  AIPANY_MOBILE_PREVIEW_TENANT: z.string().min(1).default("mobile-preview"),
 
   DASHSCOPE_API_KEY: z.string().default(""),
   DASHSCOPE_WORKSPACE_ID: optionalString,
@@ -111,6 +114,11 @@ export function loadConfig() {
         jwtIssuer: env.AIPANY_JWT_ISSUER,
         jwtAudience: env.AIPANY_JWT_AUDIENCE,
         allowAnonymous: env.AIPANY_ALLOW_ANONYMOUS,
+      },
+      mobilePreview: {
+        enabled: env.AIPANY_MOBILE_PREVIEW_ENABLED,
+        ttlSeconds: env.AIPANY_MOBILE_PREVIEW_TOKEN_TTL_SECONDS,
+        tenantId: env.AIPANY_MOBILE_PREVIEW_TENANT,
       },
     },
     qwen: {
