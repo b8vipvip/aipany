@@ -8,6 +8,7 @@ import {
 } from "../providers/llm-provider-pool.js";
 
 export const MANAGED_RUNTIME_KEYS = [
+  "AIPANY_REALTIME_ENGINE",
   "DASHSCOPE_API_KEY",
   "DASHSCOPE_WORKSPACE_ID",
   "DASHSCOPE_ASR_WS_BASE_URL",
@@ -19,6 +20,13 @@ export const MANAGED_RUNTIME_KEYS = [
   "QWEN_OMNI_API_KEY",
   "QWEN_OMNI_BASE_URL",
   "QWEN_OMNI_MODEL",
+  "QWEN_OMNI_REALTIME_ENABLED",
+  "QWEN_OMNI_REALTIME_BASE_URL",
+  "QWEN_OMNI_REALTIME_MODEL",
+  "QWEN_OMNI_REALTIME_VOICE",
+  "QWEN_OMNI_REALTIME_TURN_DETECTION",
+  "QWEN_OMNI_REALTIME_VAD_THRESHOLD",
+  "QWEN_OMNI_REALTIME_SILENCE_MS",
   "LLM_BASE_URL",
   "LLM_API_KEY",
   "LLM_MODEL",
@@ -43,6 +51,7 @@ const SECRET_KEYS = new Set<ManagedRuntimeKey>([
 ]);
 
 const BOOLEAN_KEYS = new Set<ManagedRuntimeKey>([
+  "QWEN_OMNI_REALTIME_ENABLED",
   "CLOUD_AUDIO_INTELLIGENCE_ENABLED",
   "CLOUD_AUDIO_ENVIRONMENT_ENABLED",
   "CLOUD_AUDIO_DIARIZED_TRANSCRIPTION_ENABLED",
@@ -192,8 +201,22 @@ function sanitize(input: Record<string, unknown>): RuntimeApiConfig {
 
 function validateValue(key: ManagedRuntimeKey, value: string): string {
   if (BOOLEAN_KEYS.has(key) && value !== "true" && value !== "false") throw new Error(`${key} 只能是 true 或 false`);
-  if (["DASHSCOPE_ASR_WS_BASE_URL", "DASHSCOPE_TTS_WS_BASE_URL", "QWEN_OMNI_BASE_URL", "LLM_BASE_URL", "REMOTE_SEPARATION_BASE_URL"].includes(key)) {
+  if (["DASHSCOPE_ASR_WS_BASE_URL", "DASHSCOPE_TTS_WS_BASE_URL", "QWEN_OMNI_BASE_URL", "QWEN_OMNI_REALTIME_BASE_URL", "LLM_BASE_URL", "REMOTE_SEPARATION_BASE_URL"].includes(key)) {
     try { new URL(value); } catch { throw new Error(`${key} 不是有效 URL`); }
+  }
+  if (key === "AIPANY_REALTIME_ENGINE" && !["auto", "cascaded", "omni_realtime"].includes(value)) {
+    throw new Error("AIPANY_REALTIME_ENGINE 只能是 auto / cascaded / omni_realtime");
+  }
+  if (key === "QWEN_OMNI_REALTIME_TURN_DETECTION" && !["server_vad", "semantic_vad"].includes(value)) {
+    throw new Error("QWEN_OMNI_REALTIME_TURN_DETECTION 只能是 server_vad / semantic_vad");
+  }
+  if (key === "QWEN_OMNI_REALTIME_VAD_THRESHOLD") {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number < -1 || number > 1) throw new Error("QWEN_OMNI_REALTIME_VAD_THRESHOLD 必须在 -1 到 1 之间");
+  }
+  if (key === "QWEN_OMNI_REALTIME_SILENCE_MS") {
+    const number = Number(value);
+    if (!Number.isInteger(number) || number < 200 || number > 6000) throw new Error("QWEN_OMNI_REALTIME_SILENCE_MS 必须是 200 到 6000 的整数");
   }
   if (key === "REMOTE_SEPARATION_TRIGGER" && !["overlap_only", "overlap_or_multi_speaker", "always_owner_focus"].includes(value)) {
     throw new Error(`${key} 的值无效`);
