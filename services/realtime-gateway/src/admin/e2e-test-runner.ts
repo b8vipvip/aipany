@@ -17,11 +17,21 @@ export interface AdminE2eTestResult {
   };
 }
 
+interface RealtimeRoundTripResult {
+  transcript: string;
+  answerText: string;
+  responseAudioBytes: number;
+  sessionReadyMs: number;
+  asrFinalMs?: number;
+  llmFirstTokenMs?: number;
+}
+
 export async function runAdminE2eTest(): Promise<AdminE2eTestResult> {
   const startedAt = Date.now();
   const config = loadConfig();
   if (!config.qwen.apiKey) throw new Error("DASHSCOPE_API_KEY 未配置");
-  if (!config.server.token) throw new Error("完整 E2E 自检需要配置 AIPANY_GATEWAY_TOKEN");
+  const gatewayToken = config.server.token;
+  if (!gatewayToken) throw new Error("完整 E2E 自检需要配置 AIPANY_GATEWAY_TOKEN");
 
   const inputTtsStartedAt = Date.now();
   const inputAudio24k = await synthesizeTestSpeech(config);
@@ -32,7 +42,7 @@ export async function runAdminE2eTest(): Promise<AdminE2eTestResult> {
   const trailingSilence = Buffer.alloc(Math.floor(16000 * 2 * 1.5));
   const testAudio = Buffer.concat([pcm16k, trailingSilence]);
   const result = await runRealtimeRoundTrip({
-    token: config.server.token,
+    token: gatewayToken,
     port: config.server.port,
     audio: testAudio,
     startedAt,
@@ -83,15 +93,8 @@ async function runRealtimeRoundTrip(input: {
   port: number;
   audio: Buffer;
   startedAt: number;
-}): Promise<{
-  transcript: string;
-  answerText: string;
-  responseAudioBytes: number;
-  sessionReadyMs: number;
-  asrFinalMs?: number;
-  llmFirstTokenMs?: number;
-}> {
-  return await withTimeout(async () => await new Promise((resolve, reject) => {
+}): Promise<RealtimeRoundTripResult> {
+  return await withTimeout(async () => await new Promise<RealtimeRoundTripResult>((resolve, reject) => {
     const ws = new WebSocket(`ws://127.0.0.1:${input.port}/v1/realtime?token=${encodeURIComponent(input.token)}`);
     let transcript = "";
     let answerText = "";
