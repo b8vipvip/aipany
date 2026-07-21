@@ -1,6 +1,6 @@
 {
   "name": "aipany",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "private": true,
   "description": "Aipany Hybrid Audio Intelligence、Social Intelligence 与实时 AI 语音平台",
   "workspaces": [
