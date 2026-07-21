@@ -32,6 +32,7 @@ export async function benchmarkRelayProvider(
   options: { firstTokenTimeoutMs?: number; totalTimeoutMs?: number; concurrency?: number } = {},
 ): Promise<RelayBenchmarkResult> {
   const startedAt = Date.now();
+  const benchmarkAt = Date.now();
   const firstTokenTimeoutMs = options.firstTokenTimeoutMs ?? Math.min(provider.firstTokenTimeoutMs ?? 12000, 15000);
   const totalTimeoutMs = options.totalTimeoutMs ?? Math.min(provider.totalTimeoutMs ?? 60000, 30000);
   const concurrency = Math.max(1, Math.min(5, options.concurrency ?? 3));
@@ -59,14 +60,23 @@ export async function benchmarkRelayProvider(
     .filter((item) => item.eligible && item.scoreMs !== undefined)
     .sort((a, b) => (a.scoreMs ?? Number.MAX_SAFE_INTEGER) - (b.scoreMs ?? Number.MAX_SAFE_INTEGER));
 
-  const eligibleModels: LlmModelConfig[] = eligible.map((item, index) => ({
-    id: item.model,
-    enabled: true,
-    priority: (index + 1) * 10,
-    protocols: [...item.protocols]
-      .sort((a, b) => (a.firstTokenMs ?? Number.MAX_SAFE_INTEGER) - (b.firstTokenMs ?? Number.MAX_SAFE_INTEGER))
-      .map((entry) => entry.protocol),
-  }));
+  const eligibleModels: LlmModelConfig[] = eligible.map((item, index) => {
+    const protocolLatencyMs: LlmModelConfig["protocolLatencyMs"] = {};
+    for (const result of item.protocols) {
+      if (result.firstTokenMs !== undefined) protocolLatencyMs[result.protocol] = result.firstTokenMs;
+    }
+    return {
+      id: item.model,
+      enabled: true,
+      priority: (index + 1) * 10,
+      protocols: [...item.protocols]
+        .sort((a, b) => (a.firstTokenMs ?? Number.MAX_SAFE_INTEGER) - (b.firstTokenMs ?? Number.MAX_SAFE_INTEGER))
+        .map((entry) => entry.protocol),
+      benchmarkAt,
+      benchmarkScoreMs: item.scoreMs,
+      protocolLatencyMs,
+    };
+  });
 
   return {
     providerId: provider.id,
@@ -245,7 +255,7 @@ function authHeaders(apiKey: string, accept: string): Record<string, string> {
     Authorization: `Bearer ${apiKey}`,
     "Content-Type": "application/json",
     Accept: accept,
-    "User-Agent": "Mozilla/5.0 Aipany-Relay-Tester/0.4.3",
+    "User-Agent": "Mozilla/5.0 Aipany-Relay-Tester/0.4.4",
   };
 }
 

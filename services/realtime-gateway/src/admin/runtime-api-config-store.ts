@@ -212,8 +212,24 @@ function mergeLlmProviderPoolSecrets(current: LlmProviderPoolConfig, raw: unknow
     const id = typeof provider.id === "string" ? provider.id.trim() : "";
     const previous = existing.get(id);
     const suppliedApiKey = typeof provider.apiKey === "string" ? provider.apiKey.trim() : "";
+    const previousModels = new Map(previous?.models.map((model) => [model.id, model]) ?? []);
+    const models = Array.isArray(provider.models)
+      ? provider.models.map((entryModel) => {
+          if (!entryModel || typeof entryModel !== "object" || Array.isArray(entryModel)) return entryModel;
+          const model = entryModel as Record<string, unknown>;
+          const modelId = typeof model.id === "string" ? model.id.trim() : "";
+          const oldModel = previousModels.get(modelId);
+          return {
+            ...model,
+            benchmarkAt: model.benchmarkAt ?? oldModel?.benchmarkAt,
+            benchmarkScoreMs: model.benchmarkScoreMs ?? oldModel?.benchmarkScoreMs,
+            protocolLatencyMs: model.protocolLatencyMs ?? oldModel?.protocolLatencyMs,
+          };
+        })
+      : provider.models;
     return {
       ...provider,
+      models,
       apiKey: suppliedApiKey || previous?.apiKey || "",
     };
   });

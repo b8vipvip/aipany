@@ -2,6 +2,67 @@
 
 > 本文档记录重要业务逻辑、框架、协议和架构决策。后续涉及架构、协议或核心运行逻辑的修改必须同步更新本文件。
 
+## 2026-07-21 · v0.4.4 LLM Failover Latency & Observability
+
+### 背景
+
+生产 E2E 发现同一中转站测速首 Token 约 1–2 秒，但完整链路偶发达到 14.259 秒。旧实现的 `preferredRouteKey` 为进程级全局状态且无 TTL，配置重新测速或优先级变化后旧路由仍可能继续优先；同时单路由只能使用静态 12 秒首 Token 超时，管理员无法看到实际 Failover 尝试链。
+
+### 路由状态隔离
+
+- Provider Pool 生成不包含秘密的配置指纹；
+- 首选路由只在相同配置指纹内生效；
+- 首选路由 TTL 为 5 分钟；
+- 配置保存、Relay Benchmark 或配置导入后主动清空 preferred / health；
+- 最近请求 Trace 保留用于诊断。
+
+因此重新测速、修改 Provider 优先级或模型顺序后，旧的成功路由不会继续压过新配置。
+
+### 自适应首 Token 超时
+
+Relay Model Tester 将 `benchmarkAt`、`benchmarkScoreMs` 与 `protocolLatencyMs` 持久化到模型配置。最近 24 小时存在对应协议测速时：
+
+```text
+adaptiveTimeout = max(4000ms, benchmarkFirstToken * 3 + 1000ms)
+effectiveTimeout = min(configuredTimeout, adaptiveTimeout)
+```
+
+例如协议实测首 Token 约 1000 ms 时，运行时单路由异常等待上限会从默认 12000 ms 收紧为约 4000 ms；管理员配置的更短超时仍然优先。
+
+普通管理页保存配置时会保留服务器已记录的 benchmark metadata，避免浏览器未显式回传测速字段时丢失自适应超时依据。
+
+### Failover Trace
+
+每次 LLM 请求记录：
+
+- Provider / Model / Protocol；
+- 实际尝试顺序；
+- 路由首 Token 超时阈值；
+- 实际首 Token；
+- 单路由耗时；
+- 成功 / 失败 / 取消；
+- 失败原因；
+- 最终命中路由。
+
+新增管理接口：
+
+```text
+GET /admin/api/config/llm-routing
+```
+
+文本 LLM 页面展示实时路由健康、Preferred TTL、自适应超时、测速延迟、失败次数与冷却状态；诊断测试页面展示最近完整 Failover 请求链。管理面 E2E 自检会关联对应 LLM Route Trace，便于直接定位某一次高延迟是哪个中转站、模型或协议造成的。
+
+### 测试
+
+新增回归覆盖：
+
+- 配置指纹变化后旧 preferred 不再覆盖新优先级；
+- 失败路由与成功 fallback 均进入同一 Trace；
+- Benchmark 延迟会生成更短的自适应首 Token Timeout；
+- Routing state reset 清除 preferred / health 且保留历史 Trace。
+
+---
+
 ## 2026-07-21 · v0.4.3 Admin Console v2 & Provider Diagnostics
 
 ### 目标
