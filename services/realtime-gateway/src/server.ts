@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage } from "node:http";
 import WebSocket, { WebSocketServer } from "ws";
 import {
@@ -6,14 +7,42 @@ import {
   PrivacyAwareSpeakerIdentityStore,
   type SpeakerIdentityStore,
 } from "@aipany/audio-intelligence";
-import { clientControlEventSchema } from "@aipany/protocol";
+import {
+  clientControlEventSchema,
+  type InteractionMode,
+  type SessionStartEvent,
+} from "@aipany/protocol";
 import { handleAdminConfigHttp } from "./admin/admin-config-http.js";
 import { RuntimeApiConfigStore } from "./admin/runtime-api-config-store.js";
 import { authenticateRequest, type AuthContext } from "./auth.js";
 import { loadConfig, type AppConfig } from "./config.js";
 import { getClientVoiceOptions } from "./mobile/client-capabilities.js";
 import { createMobilePreviewIdentity, issueMobilePreviewJwt } from "./mobile/mobile-preview.js";
+import {
+  RealtimeObservabilityStore,
+  type RealtimeEngine,
+  type SessionObservability,
+} from "./observability/realtime-observability.js";
 import { LowLatencyRealtimeSession } from "./session/low-latency-realtime-session.js";
+import { QwenOmniLiveSession } from "./session/qwen-omni-live-session.js";
+
+interface GatewaySession {
+  readonly id: string;
+  start(event: SessionStartEvent): Promise<void>;
+  appendAudio(audio: Buffer): void;
+  commitAudio(): void;
+  cancelResponse(): void;
+  setInteractionMode(mode: InteractionMode, source: "manual" | "voice_command" | "auto"): void;
+  respondToModeSuggestion(suggestionId: string, accepted: boolean): void;
+  setSpeakerConsent(granted: boolean): Promise<void>;
+  revokeSpeakerConsent(deleteExisting: boolean): Promise<void>;
+  sendSpeakerConsentStatus(): Promise<void>;
+  listSpeakerIdentities(): Promise<void>;
+  startSpeakerEnrollment(input: { personName: string; relation?: string; isOwner?: boolean }): Promise<void>;
+  cancelSpeakerEnrollment(enrollmentId: string): void;
+  deleteSpeakerIdentity(personId: string): Promise<void>;
+  close(): void;
+}
 
 export function createGatewayServer(
   config: AppConfig,
@@ -21,35 +50,47 @@ export function createGatewayServer(
     filePath: process.env.AIPANY_RUNTIME_CONFIG_PATH,
     adminToken: process.env.AIPANY_ADMIN_TOKEN,
   }),
+  observability = new RealtimeObservabilityStore({ filePath: config.observability.filePath }),
 ) {
   const identityStore = createSpeakerIdentityStore(config);
   const authContexts = new WeakMap<IncomingMessage, AuthContext>();
   const mobilePreviewRequests = new Map<string, number[]>();
   const httpServer = createServer(async (request, response) => {
     try {
-      if (await handleAdminConfigHttp(request, response, runtimeApiConfigStore)) return;
+      if (await handleAdminConfigHttp(request, response, runtimeApiConfigStore, observability)) return;
       const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
 
       if (request.method === "GET" && url.pathname === "/v1/mobile/capabilities") {
         const runtimeConfig = loadConfig();
+        const selectedEngine = resolveRealtimeEngine(runtimeConfig);
         respondJson(response, 200, {
-          version: "0.4.7",
+          version: "0.5.0",
           previewEnabled: runtimeConfig.server.mobilePreview.enabled,
           websocketPath: "/v1/realtime",
+          realtimeEngine: selectedEngine,
+          nativeLiveAvailable: isNativeLiveAvailable(runtimeConfig),
           defaults: {
-            outputVoice: runtimeConfig.qwen.ttsVoice,
+            outputVoice: selectedEngine === "omni_realtime"
+              ? runtimeConfig.qwenOmniRealtime.voice
+              : runtimeConfig.qwen.ttsVoice,
             interactionMode: "auto",
             socialProactivity: 0.45,
             assistantAliases: ["Aipany", "小派"],
           },
-          voices: getClientVoiceOptions(runtimeConfig.qwen.ttsModel, runtimeConfig.qwen.ttsVoice),
+          voices: getClientVoiceOptions(
+            selectedEngine === "omni_realtime" ? runtimeConfig.qwenOmniRealtime.model : runtimeConfig.qwen.ttsModel,
+            selectedEngine === "omni_realtime" ? runtimeConfig.qwenOmniRealtime.voice : runtimeConfig.qwen.ttsVoice,
+          ),
           interactionModes: ["auto", "owner_focus", "group"],
           features: {
-            localEndpointCommit: true,
+            localEndpointCommit: selectedEngine === "cascaded",
+            nativeTurnDetection: selectedEngine === "omni_realtime",
             bargeIn: true,
             realtimeTranscript: true,
             perSessionVoice: true,
             socialProactivity: true,
+            automaticReconnect: true,
+            clientTelemetry: true,
           },
         });
         return;
@@ -58,15 +99,18 @@ export function createGatewayServer(
       if (request.method === "POST" && url.pathname === "/v1/mobile/bootstrap") {
         const runtimeConfig = loadConfig();
         if (!runtimeConfig.server.mobilePreview.enabled) {
+          observability.record({ level: "warn", category: "auth", event: "mobile.bootstrap.disabled" });
           respondJson(response, 403, { error: "mobile_preview_disabled" });
           return;
         }
         const jwtSecret = runtimeConfig.server.auth.jwtSecret;
         if (!jwtSecret) {
+          observability.record({ level: "error", category: "auth", event: "mobile.bootstrap.jwt_missing" });
           respondJson(response, 503, { error: "mobile_preview_requires_jwt" });
           return;
         }
         if (!allowMobilePreviewRequest(request, mobilePreviewRequests)) {
+          observability.record({ level: "warn", category: "auth", event: "mobile.bootstrap.rate_limited" });
           respondJson(response, 429, { error: "rate_limited" });
           return;
         }
@@ -96,16 +140,20 @@ export function createGatewayServer(
 
       if (request.method === "GET" && url.pathname === "/health") {
         const snapshot = runtimeApiConfigStore.snapshot();
+        const runtimeConfig = loadConfig();
         const enabledLlmProviders = snapshot.llmProviderPool.providers.filter((provider) =>
           provider.enabled && provider.apiKeyConfigured && provider.models.some((model) => model.enabled),
         );
         respondJson(response, 200, {
           ok: true,
           service: "aipany-realtime-gateway",
-          version: "0.4.7",
+          version: "0.5.0",
           speakerIdentityStore: config.speakerIdentity.store,
           audioFrontEnd: config.audioFrontEnd.enabled,
           mobilePreview: config.server.mobilePreview.enabled,
+          realtimeEngine: resolveRealtimeEngine(runtimeConfig),
+          nativeLiveAvailable: isNativeLiveAvailable(runtimeConfig),
+          observability: true,
           runtimeApiConfig: {
             enabled: snapshot.enabled,
             dashscopeConfigured: Boolean(snapshot.secrets.DASHSCOPE_API_KEY?.configured),
@@ -122,6 +170,12 @@ export function createGatewayServer(
         response.end();
         return;
       }
+      observability.record({
+        level: "error",
+        category: "http",
+        event: "http.request.error",
+        data: { message: error instanceof Error ? error.message : String(error), path: request.url ?? "" },
+      });
       respondJson(response, 500, { error: "internal_error", message: error instanceof Error ? error.message : String(error) });
     }
   });
@@ -138,6 +192,12 @@ export function createGatewayServer(
 
     const authContext = authenticateRequest(request, url, config.server.auth);
     if (!authContext) {
+      observability.record({
+        level: "warn",
+        category: "auth",
+        event: "websocket.auth.rejected",
+        data: { remoteAddress: request.socket.remoteAddress ?? "" },
+      });
       socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
       socket.destroy();
       return;
@@ -148,25 +208,32 @@ export function createGatewayServer(
   });
 
   wss.on("connection", (ws, request) => {
+    const connectionId = randomUUID();
     const authContext = authContexts.get(request) ?? {
       authenticated: false,
       legacy: false,
       scopes: new Set(["*"]),
     };
-    let sessionConfig: AppConfig;
-    try {
-      sessionConfig = loadConfig();
-    } catch (error) {
-      sendError(ws, "RUNTIME_CONFIG_INVALID", error instanceof Error ? error.message : String(error));
-      ws.close(1011, "runtime config invalid");
-      return;
-    }
-    const session = new LowLatencyRealtimeSession(ws, sessionConfig, identityStore, authContext);
+    let session: GatewaySession | undefined;
+    let telemetry: SessionObservability | undefined;
     let initialized = false;
+    let sessionStarting = false;
+
+    instrumentOutgoingWebSocket(ws, () => telemetry);
+    observability.record({
+      level: "info",
+      category: "connection",
+      event: "websocket.connected",
+      connectionId,
+      data: {
+        remoteAddress: request.socket.remoteAddress ?? "",
+        userAgent: request.headers["user-agent"] ?? "",
+      },
+    });
 
     ws.on("message", (raw, isBinary) => {
       if (isBinary) {
-        if (!initialized) {
+        if (!initialized || !session) {
           sendError(ws, "SESSION_NOT_STARTED", "请先发送 session.start 事件");
           return;
         }
@@ -190,68 +257,118 @@ export function createGatewayServer(
 
       const event = parsed.data;
       switch (event.type) {
-        case "session.start":
-          if (initialized) {
+        case "session.start": {
+          if (initialized || sessionStarting) {
             sendError(ws, "SESSION_ALREADY_STARTED", "当前连接已经启动会话");
             return;
           }
-          initialized = true;
-          void session.start(event).catch((error) => {
-            sendError(ws, "SESSION_START_FAILED", error instanceof Error ? error.message : String(error));
+          sessionStarting = true;
+          let sessionConfig: AppConfig;
+          try {
+            sessionConfig = loadConfig();
+          } catch (error) {
+            sendError(ws, "RUNTIME_CONFIG_INVALID", error instanceof Error ? error.message : String(error));
+            ws.close(1011, "runtime config invalid");
+            return;
+          }
+          const initialEngine = resolveRealtimeEngine(sessionConfig);
+          telemetry = observability.beginSession({
+            sessionId: connectionId,
+            connectionId,
+            engine: initialEngine,
+            tenantId: event.session.tenantId,
+            userId: event.session.userId,
+            deviceId: event.session.device.deviceId,
+            deviceType: event.session.device.deviceType,
+            platform: event.session.device.platform,
+            appVersion: event.session.device.appVersion,
+            remoteAddress: request.socket.remoteAddress,
+            userAgent: typeof request.headers["user-agent"] === "string" ? request.headers["user-agent"] : undefined,
+          });
+          telemetry.event("engine.selected", {
+            requested: sessionConfig.server.realtimeEngine,
+            selected: initialEngine,
+            nativeLiveAvailable: isNativeLiveAvailable(sessionConfig),
+          }, "info", "engine");
+
+          void startGatewaySession({
+            ws,
+            event,
+            config: sessionConfig,
+            identityStore,
+            authContext,
+            initialEngine,
+            telemetry,
+          }).then((started) => {
+            session = started.session;
+            telemetry!.report.engine = started.engine;
+            initialized = true;
+            sessionStarting = false;
+          }).catch((error) => {
+            sessionStarting = false;
+            telemetry?.event("session.start.error", { message: formatError(error) }, "error", "session");
+            sendError(ws, "SESSION_START_FAILED", formatError(error));
             ws.close(1011, "session start failed");
           });
           break;
+        }
         case "input_audio_buffer.commit":
-          session.commitAudio();
+          session?.commitAudio();
           break;
         case "response.cancel":
-          session.cancelResponse();
+          session?.cancelResponse();
           break;
         case "mode.set":
-          session.setInteractionMode(event.mode, "manual");
+          session?.setInteractionMode(event.mode, "manual");
           break;
         case "mode.suggestion.respond":
-          session.respondToModeSuggestion(event.suggestionId, event.accepted);
+          session?.respondToModeSuggestion(event.suggestionId, event.accepted);
+          break;
+        case "client.telemetry":
+          telemetry?.event(`client.${event.name}`, {
+            valueMs: event.valueMs,
+            ...(event.details ? { details: event.details } : {}),
+          }, "info", "client");
           break;
         case "speaker.consent.grant":
-          void session.setSpeakerConsent(true).catch((error) => {
-            sendError(ws, "SPEAKER_CONSENT_FAILED", error instanceof Error ? error.message : String(error));
+          void session?.setSpeakerConsent(true).catch((error) => {
+            sendError(ws, "SPEAKER_CONSENT_FAILED", formatError(error));
           });
           break;
         case "speaker.consent.revoke":
-          void session.revokeSpeakerConsent(event.deleteExisting).catch((error) => {
-            sendError(ws, "SPEAKER_CONSENT_FAILED", error instanceof Error ? error.message : String(error));
+          void session?.revokeSpeakerConsent(event.deleteExisting).catch((error) => {
+            sendError(ws, "SPEAKER_CONSENT_FAILED", formatError(error));
           });
           break;
         case "speaker.consent.status":
-          void session.sendSpeakerConsentStatus().catch((error) => {
-            sendError(ws, "SPEAKER_CONSENT_FAILED", error instanceof Error ? error.message : String(error));
+          void session?.sendSpeakerConsentStatus().catch((error) => {
+            sendError(ws, "SPEAKER_CONSENT_FAILED", formatError(error));
           });
           break;
         case "speaker.enrollment.start":
-          void session.startSpeakerEnrollment({
+          void session?.startSpeakerEnrollment({
             personName: event.personName,
             relation: event.relation,
             isOwner: event.isOwner,
           }).catch((error) => {
-            sendError(ws, "SPEAKER_ENROLLMENT_FAILED", error instanceof Error ? error.message : String(error));
+            sendError(ws, "SPEAKER_ENROLLMENT_FAILED", formatError(error));
           });
           break;
         case "speaker.enrollment.cancel":
-          session.cancelSpeakerEnrollment(event.enrollmentId);
+          session?.cancelSpeakerEnrollment(event.enrollmentId);
           break;
         case "speaker.identity.list":
-          void session.listSpeakerIdentities().catch((error) => {
-            sendError(ws, "SPEAKER_IDENTITY_LIST_FAILED", error instanceof Error ? error.message : String(error));
+          void session?.listSpeakerIdentities().catch((error) => {
+            sendError(ws, "SPEAKER_IDENTITY_LIST_FAILED", formatError(error));
           });
           break;
         case "speaker.identity.delete":
-          void session.deleteSpeakerIdentity(event.personId).catch((error) => {
-            sendError(ws, "SPEAKER_IDENTITY_DELETE_FAILED", error instanceof Error ? error.message : String(error));
+          void session?.deleteSpeakerIdentity(event.personId).catch((error) => {
+            sendError(ws, "SPEAKER_IDENTITY_DELETE_FAILED", formatError(error));
           });
           break;
         case "session.finish":
-          session.close();
+          session?.close();
           ws.close(1000, "session finished");
           break;
         case "ping":
@@ -260,8 +377,32 @@ export function createGatewayServer(
       }
     });
 
-    ws.on("close", () => session.close());
-    ws.on("error", () => session.close());
+    ws.on("close", (code, reason) => {
+      session?.close();
+      telemetry?.end(code, reason.toString());
+      if (!telemetry) {
+        observability.record({
+          level: code === 1000 ? "info" : "warn",
+          category: "connection",
+          event: "websocket.closed.before_session",
+          connectionId,
+          data: { code, reason: reason.toString() },
+        });
+      }
+    });
+    ws.on("error", (error) => {
+      telemetry?.event("websocket.error", { message: error.message }, "error", "connection");
+      if (!telemetry) {
+        observability.record({
+          level: "error",
+          category: "connection",
+          event: "websocket.error.before_session",
+          connectionId,
+          data: { message: error.message },
+        });
+      }
+      session?.close();
+    });
   });
 
   httpServer.on("close", () => {
@@ -269,6 +410,119 @@ export function createGatewayServer(
   });
 
   return httpServer;
+}
+
+export function resolveRealtimeEngine(config: AppConfig): RealtimeEngine {
+  if (config.server.realtimeEngine === "cascaded") return "cascaded";
+  if (config.server.realtimeEngine === "omni_realtime") return "omni_realtime";
+  return isNativeLiveAvailable(config) ? "omni_realtime" : "cascaded";
+}
+
+export function isNativeLiveAvailable(config: AppConfig): boolean {
+  return config.qwenOmniRealtime.enabled && Boolean(config.qwenOmniRealtime.apiKey.trim());
+}
+
+async function startGatewaySession(input: {
+  ws: WebSocket;
+  event: SessionStartEvent;
+  config: AppConfig;
+  identityStore: SpeakerIdentityStore;
+  authContext: AuthContext;
+  initialEngine: RealtimeEngine;
+  telemetry: SessionObservability;
+}): Promise<{ session: GatewaySession; engine: RealtimeEngine }> {
+  if (input.initialEngine === "omni_realtime") {
+    const live = new QwenOmniLiveSession(input.ws, input.config, input.authContext);
+    try {
+      await live.start(input.event);
+      return { session: live, engine: "omni_realtime" };
+    } catch (error) {
+      live.close();
+      if (input.config.server.realtimeEngine !== "auto") throw error;
+      input.telemetry.event("engine.fallback", {
+        from: "omni_realtime",
+        to: "cascaded",
+        reason: formatError(error),
+      }, "warn", "engine");
+    }
+  }
+
+  const cascaded = new LowLatencyRealtimeSession(input.ws, input.config, input.identityStore, input.authContext);
+  await cascaded.start(input.event);
+  return { session: cascaded, engine: "cascaded" };
+}
+
+function instrumentOutgoingWebSocket(ws: WebSocket, getTelemetry: () => SessionObservability | undefined): void {
+  const originalSend = ws.send.bind(ws) as (...args: unknown[]) => boolean;
+  let activeResponseId: string | undefined;
+  const firstTextSeen = new Set<string>();
+  const firstAudioSeen = new Set<string>();
+
+  (ws as unknown as { send: (...args: unknown[]) => boolean }).send = (...args: unknown[]): boolean => {
+    const data = args[0];
+    const telemetry = getTelemetry();
+    if (telemetry) {
+      if (typeof data === "string") {
+        try {
+          const event = JSON.parse(data) as Record<string, unknown>;
+          const type = typeof event.type === "string" ? event.type : "";
+          if (type === "session.created") {
+            telemetry.event("session.created", { clientSessionId: event.sessionId }, "info", "session");
+          } else if (type === "session.ready") {
+            telemetry.event("session.ready", {}, "info", "session");
+          } else if (type === "input_audio_buffer.speech_started") {
+            telemetry.event("speech.started", {}, "info", "audio");
+          } else if (type === "input_audio_buffer.speech_stopped") {
+            telemetry.event("speech.stopped", {}, "info", "audio");
+          } else if (type === "transcript.final") {
+            const text = typeof event.text === "string" ? event.text : "";
+            telemetry.event("transcript.final", { textChars: text.length }, "info", "asr");
+          } else if (type === "response.created") {
+            activeResponseId = typeof event.responseId === "string" ? event.responseId : undefined;
+            if (activeResponseId) {
+              firstTextSeen.delete(activeResponseId);
+              firstAudioSeen.delete(activeResponseId);
+            }
+            telemetry.event("response.created", { responseId: activeResponseId }, "info", "pipeline");
+          } else if (type === "response.text.delta" && activeResponseId && !firstTextSeen.has(activeResponseId)) {
+            firstTextSeen.add(activeResponseId);
+            telemetry.event("response.first_text", { responseId: activeResponseId }, "info", "pipeline");
+          } else if (type === "response.interrupted") {
+            telemetry.event("response.interrupted", {
+              responseId: event.responseId,
+              reason: event.reason,
+            }, "info", "pipeline");
+            if (event.responseId === activeResponseId) activeResponseId = undefined;
+          } else if (type === "response.done") {
+            telemetry.event("response.done", { responseId: event.responseId }, "info", "pipeline");
+            if (event.responseId === activeResponseId) activeResponseId = undefined;
+          } else if (type === "error") {
+            const code = typeof event.code === "string" ? event.code : "UNKNOWN";
+            telemetry.event("pipeline.error", {
+              code,
+              message: typeof event.message === "string" ? event.message : "",
+              retryable: event.retryable,
+            }, "error", errorCategory(code));
+          }
+        } catch {
+          // Non-JSON text frames are ignored by observability.
+        }
+      } else if (Buffer.isBuffer(data) && activeResponseId && !firstAudioSeen.has(activeResponseId)) {
+        firstAudioSeen.add(activeResponseId);
+        telemetry.event("response.first_audio", { responseId: activeResponseId, bytes: data.length }, "info", "audio");
+      }
+    }
+    return originalSend(...args);
+  };
+}
+
+function errorCategory(code: string): string {
+  if (code.startsWith("ASR")) return "asr";
+  if (code.startsWith("TTS")) return "tts";
+  if (code.startsWith("LLM") || code.startsWith("PIPELINE")) return "llm";
+  if (code.startsWith("OMNI")) return "omni";
+  if (code.startsWith("SPEAKER")) return "speaker";
+  return "realtime";
 }
 
 function createSpeakerIdentityStore(config: AppConfig): SpeakerIdentityStore {
@@ -337,4 +591,8 @@ function respondJson(response: import("node:http").ServerResponse, status: numbe
 function sendError(ws: WebSocket, code: string, message: string): void {
   if (ws.readyState !== WebSocket.OPEN) return;
   ws.send(JSON.stringify({ type: "error", code, message, retryable: false }));
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
