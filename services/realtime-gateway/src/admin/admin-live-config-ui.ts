@@ -18,7 +18,7 @@ function adminLiveConfigUiClient(): void {
         <div class="field"><label>Native Live</label><select id="QWEN_OMNI_REALTIME_ENABLED"><option value="true">开启</option><option value="false">关闭</option></select><div class="hint">关闭后 Auto 会使用 Cascaded。</div></div>
         <div class="field full"><label>Realtime WebSocket Base URL</label><input id="QWEN_OMNI_REALTIME_BASE_URL" placeholder="留空复用 DashScope Workspace 默认实时地址" /></div>
         <div class="field"><label>Realtime Model</label><input id="QWEN_OMNI_REALTIME_MODEL" placeholder="qwen3.5-omni-plus-realtime" /></div>
-        <div class="field"><label>默认音色</label><input id="QWEN_OMNI_REALTIME_VOICE" placeholder="Cherry" /></div>
+        <div class="field"><label>默认音色</label><input id="QWEN_OMNI_REALTIME_VOICE" placeholder="Tina" /><div class="hint">qwen3.5-omni-plus-realtime 推荐从模型支持的 Native Live 音色中选择。</div></div>
         <div class="field"><label>Turn Detection</label><select id="QWEN_OMNI_REALTIME_TURN_DETECTION"><option value="server_vad">Server VAD（推荐首发）</option><option value="semantic_vad">Semantic VAD</option></select></div>
         <div class="field"><label>VAD Threshold</label><input id="QWEN_OMNI_REALTIME_VAD_THRESHOLD" type="number" min="-1" max="1" step="0.05" /></div>
         <div class="field"><label>静音结束窗口(ms)</label><input id="QWEN_OMNI_REALTIME_SILENCE_MS" type="number" min="200" max="6000" step="50" /></div>
@@ -42,7 +42,7 @@ function adminLiveConfigUiClient(): void {
     setValue("QWEN_OMNI_REALTIME_ENABLED", values.QWEN_OMNI_REALTIME_ENABLED || "false");
     setValue("QWEN_OMNI_REALTIME_BASE_URL", values.QWEN_OMNI_REALTIME_BASE_URL || "");
     setValue("QWEN_OMNI_REALTIME_MODEL", values.QWEN_OMNI_REALTIME_MODEL || "qwen3.5-omni-plus-realtime");
-    setValue("QWEN_OMNI_REALTIME_VOICE", values.QWEN_OMNI_REALTIME_VOICE || values.QWEN_TTS_VOICE || "Cherry");
+    setValue("QWEN_OMNI_REALTIME_VOICE", values.QWEN_OMNI_REALTIME_VOICE || "Tina");
     setValue("QWEN_OMNI_REALTIME_TURN_DETECTION", values.QWEN_OMNI_REALTIME_TURN_DETECTION || "server_vad");
     setValue("QWEN_OMNI_REALTIME_VAD_THRESHOLD", values.QWEN_OMNI_REALTIME_VAD_THRESHOLD || "0.2");
     setValue("QWEN_OMNI_REALTIME_SILENCE_MS", values.QWEN_OMNI_REALTIME_SILENCE_MS || "350");
