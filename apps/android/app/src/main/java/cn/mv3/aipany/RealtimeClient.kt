@@ -9,8 +9,10 @@ import okio.ByteString
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.min
 
 class RealtimeClient(
     private val onState: (String) -> Unit,
@@ -23,6 +25,16 @@ class RealtimeClient(
         val reason: String,
         val failure: String?,
         val wasConnected: Boolean,
+        val reconnectAttempt: Int,
+    )
+
+    private data class ConnectionSpec(
+        val serverUrl: String,
+        val token: String,
+        val tenantId: String,
+        val userId: String,
+        val deviceId: String,
+        val settings: AppSettings,
     )
 
     private val httpClient = OkHttpClient.Builder()
@@ -30,16 +42,19 @@ class RealtimeClient(
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .retryOnConnectionFailure(true)
         .build()
-    private val heartbeatExecutor = Executors.newSingleThreadScheduledExecutor()
+    private val scheduler = Executors.newSingleThreadScheduledExecutor()
     private val connectionGeneration = AtomicLong(0)
 
     @Volatile private var socket: WebSocket? = null
     @Volatile private var connected = false
     @Volatile private var lastPongAt = 0L
-    @Volatile private var lastPingTimestamp = 0L
+    @Volatile private var connectionSpec: ConnectionSpec? = null
+    @Volatile private var autoReconnectEnabled = false
+    @Volatile private var reconnectAttempt = 0
+    @Volatile private var reconnectFuture: ScheduledFuture<*>? = null
 
     init {
-        heartbeatExecutor.scheduleAtFixedRate({ heartbeatTick() }, 8, 8, TimeUnit.SECONDS)
+        scheduler.scheduleAtFixedRate({ heartbeatTick() }, 8, 8, TimeUnit.SECONDS)
     }
 
     fun connect(
@@ -50,13 +65,23 @@ class RealtimeClient(
         deviceId: String,
         settings: AppSettings,
     ) {
-        closeSilently()
-        val generation = connectionGeneration.incrementAndGet()
-        val url = normalizeWebSocketUrl(serverUrl)
-        val requestBuilder = Request.Builder().url(url)
-        if (token.isNotBlank()) requestBuilder.header("Authorization", "Bearer ${token.trim()}")
+        closeSilently(sendFinish = true, disableReconnect = false)
+        connectionSpec = ConnectionSpec(serverUrl, token, tenantId, userId, deviceId, settings)
+        autoReconnectEnabled = true
+        reconnectAttempt = 0
+        reconnectFuture?.cancel(false)
+        reconnectFuture = null
+        openConnection(connectionSpec!!)
+    }
 
-        onState("正在连接 Aipany")
+    private fun openConnection(spec: ConnectionSpec) {
+        if (!autoReconnectEnabled) return
+        val generation = connectionGeneration.incrementAndGet()
+        val url = normalizeWebSocketUrl(spec.serverUrl)
+        val requestBuilder = Request.Builder().url(url)
+        if (spec.token.isNotBlank()) requestBuilder.header("Authorization", "Bearer ${spec.token.trim()}")
+
+        onState(if (reconnectAttempt > 0) "正在自动重连 Aipany（第 $reconnectAttempt 次）" else "正在连接 Aipany")
         socket = httpClient.newWebSocket(requestBuilder.build(), object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 if (generation != connectionGeneration.get()) {
@@ -65,6 +90,7 @@ class RealtimeClient(
                 }
                 connected = true
                 lastPongAt = System.currentTimeMillis()
+                reconnectAttempt = 0
                 onState("安全连接已建立，正在启动实时语音")
                 webSocket.send(
                     JSONObject()
@@ -72,14 +98,14 @@ class RealtimeClient(
                         .put(
                             "session",
                             JSONObject()
-                                .put("tenantId", tenantId)
-                                .put("userId", userId)
+                                .put("tenantId", spec.tenantId)
+                                .put("userId", spec.userId)
                                 .put("agentId", "default-agent")
                                 .put("locale", "zh-CN")
-                                .put("assistantAliases", JSONArray(settings.aliases()))
-                                .put("interactionMode", settings.interactionMode)
-                                .put("socialProactivity", settings.socialProactivity.toDouble())
-                                .put("outputVoice", settings.voiceId)
+                                .put("assistantAliases", JSONArray(spec.settings.aliases()))
+                                .put("interactionMode", spec.settings.interactionMode)
+                                .put("socialProactivity", spec.settings.socialProactivity.toDouble())
+                                .put("outputVoice", spec.settings.voiceId)
                                 .put(
                                     "inputAudio",
                                     JSONObject()
@@ -90,7 +116,7 @@ class RealtimeClient(
                                 .put(
                                     "device",
                                     JSONObject()
-                                        .put("deviceId", deviceId)
+                                        .put("deviceId", spec.deviceId)
                                         .put("productId", "aipany-android-v1")
                                         .put("deviceType", "mobile")
                                         .put("platform", "android")
@@ -128,7 +154,6 @@ class RealtimeClient(
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
                 if (generation != connectionGeneration.get()) return
                 connected = false
-                onState("连接正在关闭：$code ${reason.ifBlank { "无原因" }}")
                 webSocket.close(code, reason)
             }
 
@@ -137,8 +162,7 @@ class RealtimeClient(
                 val wasConnected = connected
                 connected = false
                 socket = null
-                onState("连接已断开：$code ${reason.ifBlank { "无原因" }}")
-                onDisconnected(DisconnectInfo(code, reason, null, wasConnected))
+                handleUnexpectedDisconnect(DisconnectInfo(code, reason, null, wasConnected, reconnectAttempt))
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
@@ -148,10 +172,27 @@ class RealtimeClient(
                 socket = null
                 val detail = response?.let { " HTTP ${it.code}" }.orEmpty()
                 val message = "${t.message ?: t.javaClass.simpleName}$detail"
-                onState("连接失败：$message")
-                onDisconnected(DisconnectInfo(response?.code, response?.message.orEmpty(), message, wasConnected))
+                handleUnexpectedDisconnect(
+                    DisconnectInfo(response?.code, response?.message.orEmpty(), message, wasConnected, reconnectAttempt),
+                )
             }
         })
+    }
+
+    private fun handleUnexpectedDisconnect(info: DisconnectInfo) {
+        onDisconnected(info)
+        if (!autoReconnectEnabled || connectionSpec == null) {
+            onState("连接已断开")
+            return
+        }
+        reconnectAttempt += 1
+        val delaySeconds = min(15, 1 shl min(4, reconnectAttempt - 1))
+        val detail = info.failure ?: listOfNotNull(info.code?.toString(), info.reason.takeIf { it.isNotBlank() }).joinToString(" ")
+        onState("网络连接中断${if (detail.isNotBlank()) "（$detail）" else ""}，${delaySeconds}秒后自动重连")
+        reconnectFuture?.cancel(false)
+        reconnectFuture = scheduler.schedule({
+            connectionSpec?.let { openConnection(it) }
+        }, delaySeconds.toLong(), TimeUnit.SECONDS)
     }
 
     fun sendPcm(audio: ByteArray): Boolean {
@@ -183,12 +224,12 @@ class RealtimeClient(
     fun finishSession(): Boolean = sendControl("session.finish")
 
     fun close() {
-        closeSilently(sendFinish = true)
+        closeSilently(sendFinish = true, disableReconnect = true)
     }
 
     fun release() {
-        closeSilently(sendFinish = true)
-        heartbeatExecutor.shutdownNow()
+        closeSilently(sendFinish = true, disableReconnect = true)
+        scheduler.shutdownNow()
         httpClient.dispatcher.executorService.shutdown()
         httpClient.connectionPool.evictAll()
     }
@@ -197,16 +238,21 @@ class RealtimeClient(
         if (!connected) return
         val now = System.currentTimeMillis()
         if (lastPongAt > 0L && now - lastPongAt > 45_000L) {
-            // OkHttp's protocol ping and the application heartbeat have both gone
-            // stale. Cancel the socket so MainActivity can enter its reconnect loop.
+            // Both OkHttp protocol pings and the application heartbeat have gone
+            // stale. Cancelling causes the normal reconnect state machine to run.
             socket?.cancel()
             return
         }
-        lastPingTimestamp = now
         socket?.send(JSONObject().put("type", "ping").put("timestamp", now).toString())
     }
 
-    private fun closeSilently(sendFinish: Boolean = false) {
+    private fun closeSilently(sendFinish: Boolean, disableReconnect: Boolean) {
+        if (disableReconnect) {
+            autoReconnectEnabled = false
+            connectionSpec = null
+        }
+        reconnectFuture?.cancel(false)
+        reconnectFuture = null
         connectionGeneration.incrementAndGet()
         connected = false
         val current = socket
