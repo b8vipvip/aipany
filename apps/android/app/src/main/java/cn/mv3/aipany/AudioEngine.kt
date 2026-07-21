@@ -9,8 +9,12 @@ import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.AutomaticGainControl
+import android.media.audiofx.NoiseSuppressor
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicLong
 
 class AudioEngine(
     private val context: Context,
@@ -25,9 +29,16 @@ class AudioEngine(
         private const val FRAME_SAMPLES = 320
     }
 
+    data class EffectsStatus(
+        val acousticEchoCanceler: Boolean,
+        val noiseSuppressor: Boolean,
+        val automaticGainControl: Boolean,
+    )
+
     private val captureExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val playbackExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val playbackLock = Any()
+    private val playbackGeneration = AtomicLong(0)
 
     @Volatile private var running = false
     @Volatile private var released = false
@@ -36,6 +47,9 @@ class AudioEngine(
 
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
+    private var acousticEchoCanceler: AcousticEchoCanceler? = null
+    private var noiseSuppressor: NoiseSuppressor? = null
+    private var automaticGainControl: AutomaticGainControl? = null
 
     private val endpointDetector = EndpointDetector(
         onSpeechStarted = {
@@ -78,6 +92,7 @@ class AudioEngine(
             .setBufferSizeInBytes(maxOf(inputMinBuffer, FRAME_SAMPLES * 2 * 12))
             .build()
         check(record.state == AudioRecord.STATE_INITIALIZED) { "AudioRecord initialization failed" }
+        enableAudioEffects(record.audioSessionId)
 
         val outputFormat = AudioFormat.Builder()
             .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
@@ -97,13 +112,15 @@ class AudioEngine(
                     .build(),
             )
             .setAudioFormat(outputFormat)
-            .setBufferSizeInBytes(maxOf(outputMinBuffer, OUTPUT_SAMPLE_RATE * 2 / 2))
+            .setBufferSizeInBytes(maxOf(outputMinBuffer * 2, OUTPUT_SAMPLE_RATE * 2 / 5))
             .setTransferMode(AudioTrack.MODE_STREAM)
+            .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
             .build()
         check(track.state == AudioTrack.STATE_INITIALIZED) { "AudioTrack initialization failed" }
 
         audioRecord = record
         audioTrack = track
+        playbackGeneration.incrementAndGet()
         endpointDetector.reset()
         track.play()
         record.startRecording()
@@ -137,17 +154,28 @@ class AudioEngine(
 
     fun playPcm(audio: ByteArray) {
         if (released || audio.isEmpty()) return
+        val generation = playbackGeneration.get()
         playbackExecutor.execute {
-            synchronized(playbackLock) {
-                val track = audioTrack ?: return@synchronized
-                if (track.state != AudioTrack.STATE_INITIALIZED) return@synchronized
+            if (generation != playbackGeneration.get()) return@execute
+            val track = synchronized(playbackLock) {
+                if (generation != playbackGeneration.get()) return@synchronized null
+                audioTrack?.takeIf { it.state == AudioTrack.STATE_INITIALIZED }
+            } ?: return@execute
+            if (generation != playbackGeneration.get()) return@execute
+            try {
                 if (track.playState != AudioTrack.PLAYSTATE_PLAYING) track.play()
                 track.write(audio, 0, audio.size, AudioTrack.WRITE_BLOCKING)
+            } catch (_: IllegalStateException) {
+                // Playback may be interrupted or recreated while this chunk is queued.
             }
         }
     }
 
     fun interruptPlayback() {
+        // Invalidate queued chunks before touching AudioTrack so old PCM can never
+        // resume after the user interrupts the assistant.
+        playbackGeneration.incrementAndGet()
+        assistantSpeaking = false
         synchronized(playbackLock) {
             val track = audioTrack ?: return
             try {
@@ -159,9 +187,16 @@ class AudioEngine(
         }
     }
 
+    fun effectsStatus(): EffectsStatus = EffectsStatus(
+        acousticEchoCanceler = acousticEchoCanceler?.enabled == true,
+        noiseSuppressor = noiseSuppressor?.enabled == true,
+        automaticGainControl = automaticGainControl?.enabled == true,
+    )
+
     fun stop() {
-        if (!running) return
+        if (!running && audioRecord == null && audioTrack == null) return
         running = false
+        playbackGeneration.incrementAndGet()
         endpointDetector.reset()
         assistantSpeaking = false
 
@@ -173,6 +208,7 @@ class AudioEngine(
             record.release()
         }
         audioRecord = null
+        releaseAudioEffects()
 
         synchronized(playbackLock) {
             audioTrack?.let { track ->
@@ -194,5 +230,27 @@ class AudioEngine(
         released = true
         captureExecutor.shutdownNow()
         playbackExecutor.shutdownNow()
+    }
+
+    private fun enableAudioEffects(audioSessionId: Int) {
+        releaseAudioEffects()
+        acousticEchoCanceler = runCatching {
+            if (AcousticEchoCanceler.isAvailable()) AcousticEchoCanceler.create(audioSessionId)?.apply { enabled = true } else null
+        }.getOrNull()
+        noiseSuppressor = runCatching {
+            if (NoiseSuppressor.isAvailable()) NoiseSuppressor.create(audioSessionId)?.apply { enabled = true } else null
+        }.getOrNull()
+        automaticGainControl = runCatching {
+            if (AutomaticGainControl.isAvailable()) AutomaticGainControl.create(audioSessionId)?.apply { enabled = true } else null
+        }.getOrNull()
+    }
+
+    private fun releaseAudioEffects() {
+        runCatching { acousticEchoCanceler?.release() }
+        runCatching { noiseSuppressor?.release() }
+        runCatching { automaticGainControl?.release() }
+        acousticEchoCanceler = null
+        noiseSuppressor = null
+        automaticGainControl = null
     }
 }
