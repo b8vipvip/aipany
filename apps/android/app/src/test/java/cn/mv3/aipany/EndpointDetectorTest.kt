@@ -54,7 +54,7 @@ class EndpointDetectorTest {
         )
 
         repeat(30) { detector.process(frame(120), 320, false) }
-        repeat(10) { detector.process(frame(1_000), 320, true) }
+        repeat(10) { detector.process(frame(500), 320, true) }
         assertEquals(0, starts)
 
         repeat(3) { detector.process(frame(8_000), 320, true) }
