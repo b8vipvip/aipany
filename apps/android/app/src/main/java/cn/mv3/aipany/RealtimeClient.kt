@@ -52,6 +52,8 @@ class RealtimeClient(
     @Volatile private var autoReconnectEnabled = false
     @Volatile private var reconnectAttempt = 0
     @Volatile private var reconnectFuture: ScheduledFuture<*>? = null
+    @Volatile private var activeResponseId: String? = null
+    @Volatile private var firstAudioReported = false
 
     init {
         scheduler.scheduleAtFixedRate({ heartbeatTick() }, 8, 8, TimeUnit.SECONDS)
@@ -91,6 +93,8 @@ class RealtimeClient(
                 connected = true
                 lastPongAt = System.currentTimeMillis()
                 reconnectAttempt = 0
+                activeResponseId = null
+                firstAudioReported = false
                 onState("安全连接已建立，正在启动实时语音")
                 webSocket.send(
                     JSONObject()
@@ -131,13 +135,23 @@ class RealtimeClient(
                 if (generation != connectionGeneration.get()) return
                 try {
                     val event = JSONObject(text)
-                    if (event.optString("type") == "pong") {
-                        val timestamp = event.optLong("timestamp", 0L)
-                        val now = System.currentTimeMillis()
-                        lastPongAt = now
-                        if (timestamp > 0L && timestamp <= now) {
-                            val rtt = (now - timestamp).coerceAtMost(600_000)
-                            sendTelemetry("heartbeat_rtt", rtt.toDouble())
+                    when (event.optString("type")) {
+                        "pong" -> {
+                            val timestamp = event.optLong("timestamp", 0L)
+                            val now = System.currentTimeMillis()
+                            lastPongAt = now
+                            if (timestamp > 0L && timestamp <= now) {
+                                val rtt = (now - timestamp).coerceAtMost(600_000)
+                                sendTelemetry("heartbeat_rtt", rtt.toDouble())
+                            }
+                        }
+                        "response.created" -> {
+                            activeResponseId = event.optString("responseId").ifBlank { null }
+                            firstAudioReported = false
+                        }
+                        "response.done", "response.interrupted" -> {
+                            activeResponseId = null
+                            firstAudioReported = false
                         }
                     }
                     onEvent(event)
@@ -148,6 +162,10 @@ class RealtimeClient(
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                 if (generation != connectionGeneration.get()) return
+                if (activeResponseId != null && !firstAudioReported) {
+                    firstAudioReported = true
+                    sendTelemetry("first_audio_rendered")
+                }
                 onAudio(bytes.toByteArray())
             }
 
@@ -185,10 +203,15 @@ class RealtimeClient(
             onState("连接已断开")
             return
         }
+        if (info.code == 401) {
+            autoReconnectEnabled = false
+            onState("连接失败：会话身份已过期，请点击重新连接")
+            return
+        }
         reconnectAttempt += 1
         val delaySeconds = min(15, 1 shl min(4, reconnectAttempt - 1))
         val detail = info.failure ?: listOfNotNull(info.code?.toString(), info.reason.takeIf { it.isNotBlank() }).joinToString(" ")
-        onState("网络连接中断${if (detail.isNotBlank()) "（$detail）" else ""}，${delaySeconds}秒后自动重连")
+        onState("连接失败：网络连接中断${if (detail.isNotBlank()) "（$detail）" else ""}，${delaySeconds}秒后自动重连")
         reconnectFuture?.cancel(false)
         reconnectFuture = scheduler.schedule({
             connectionSpec?.let { openConnection(it) }
@@ -200,9 +223,15 @@ class RealtimeClient(
         return socket?.send(ByteString.of(*audio)) == true
     }
 
-    fun commitAudio(): Boolean = sendControl("input_audio_buffer.commit")
+    fun commitAudio(): Boolean {
+        sendTelemetry("endpoint_detected")
+        return sendControl("input_audio_buffer.commit")
+    }
 
-    fun cancelResponse(): Boolean = sendControl("response.cancel")
+    fun cancelResponse(): Boolean {
+        sendTelemetry("barge_in_detected")
+        return sendControl("response.cancel")
+    }
 
     fun setInteractionMode(mode: String): Boolean {
         if (!connected) return false
@@ -238,8 +267,6 @@ class RealtimeClient(
         if (!connected) return
         val now = System.currentTimeMillis()
         if (lastPongAt > 0L && now - lastPongAt > 45_000L) {
-            // Both OkHttp protocol pings and the application heartbeat have gone
-            // stale. Cancelling causes the normal reconnect state machine to run.
             socket?.cancel()
             return
         }
@@ -255,6 +282,8 @@ class RealtimeClient(
         reconnectFuture = null
         connectionGeneration.incrementAndGet()
         connected = false
+        activeResponseId = null
+        firstAudioReported = false
         val current = socket
         socket = null
         current?.let {
