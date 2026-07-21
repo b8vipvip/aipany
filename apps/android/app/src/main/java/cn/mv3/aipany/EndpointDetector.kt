@@ -6,16 +6,15 @@ import kotlin.math.sqrt
 
 /**
  * Lightweight client-side endpoint detector for 16 kHz / mono / PCM16 audio.
- *
- * The detector continuously adapts to the local noise floor, uses a stricter
- * speech-start threshold while assistant audio is playing, and commits after a
- * short dynamic silence window instead of waiting for the server-side 500 ms VAD.
+ * The active profile changes only the silence window; speech detection continues
+ * to adapt to the local noise floor and uses a stricter threshold during playback.
  */
 class EndpointDetector(
     private val onSpeechStarted: () -> Unit,
     private val onEndpointDetected: () -> Unit,
     private val onLevel: (dbfs: Float, noiseFloorDbfs: Float, speaking: Boolean) -> Unit,
 ) {
+    @Volatile private var profile: EndpointProfile = EndpointProfile.BALANCED
     private var noiseFloorDbfs = -60f
     private var speaking = false
     private var consecutiveSpeechFrames = 0
@@ -23,6 +22,10 @@ class EndpointDetector(
     private var speechFrames = 0
     private var cooldownFrames = 0
     private var levelFrames = 0
+
+    fun setProfile(value: EndpointProfile) {
+        profile = value
+    }
 
     fun process(samples: ShortArray, count: Int, assistantSpeaking: Boolean) {
         if (count <= 0) return
@@ -38,9 +41,6 @@ class EndpointDetector(
         if (!speaking) {
             if (cooldownFrames > 0) cooldownFrames--
 
-            // Speaker playback can leak into the microphone even with platform AEC.
-            // Require a much stronger rise above the learned noise floor while the
-            // assistant is speaking so moderate echo does not trigger false barge-in.
             val startMargin = if (assistantSpeaking) 20f else 10f
             val startThreshold = max(-42f, noiseFloorDbfs + startMargin)
             val likelySpeech = dbfs > startThreshold && dbfs > -55f
@@ -65,18 +65,13 @@ class EndpointDetector(
         } else {
             speechFrames++
             val endThreshold = max(-52f, noiseFloorDbfs + 5f)
-            if (dbfs < endThreshold) {
-                silenceFrames++
-            } else {
-                silenceFrames = 0
-            }
+            if (dbfs < endThreshold) silenceFrames++ else silenceFrames = 0
 
-            // Short utterances need a little more protection against mid-sentence
-            // pauses; longer utterances can commit more aggressively.
+            val activeProfile = profile
             val requiredSilenceFrames = when {
-                speechFrames >= 100 -> 14 // 280 ms after ~2 seconds of speech
-                speechFrames >= 50 -> 16  // 320 ms after ~1 second of speech
-                else -> 18                // 360 ms for very short utterances
+                speechFrames >= 100 -> activeProfile.longSpeechSilenceFrames
+                speechFrames >= 50 -> activeProfile.mediumSpeechSilenceFrames
+                else -> activeProfile.shortSpeechSilenceFrames
             }
 
             if (speechFrames >= 10 && silenceFrames >= requiredSilenceFrames) {
