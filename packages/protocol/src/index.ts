@@ -36,6 +36,15 @@ export const sessionStartEventSchema = z.object({
   }),
 });
 
+export const clientTelemetryNameSchema = z.enum([
+  "endpoint_detected",
+  "barge_in_detected",
+  "playback_interrupted",
+  "first_audio_rendered",
+  "audio_effects",
+  "heartbeat_rtt",
+]);
+
 export const clientControlEventSchema = z.discriminatedUnion("type", [
   sessionStartEventSchema,
   z.object({ type: z.literal("input_audio_buffer.commit") }),
@@ -46,6 +55,12 @@ export const clientControlEventSchema = z.discriminatedUnion("type", [
     type: z.literal("mode.suggestion.respond"),
     suggestionId: z.string().min(1),
     accepted: z.boolean(),
+  }),
+  z.object({
+    type: z.literal("client.telemetry"),
+    name: clientTelemetryNameSchema,
+    valueMs: z.number().min(0).max(600000).optional(),
+    details: z.record(z.union([z.string(), z.number(), z.boolean()])).optional(),
   }),
   z.object({ type: z.literal("speaker.consent.grant") }),
   z.object({ type: z.literal("speaker.consent.revoke"), deleteExisting: z.boolean().default(false) }),
