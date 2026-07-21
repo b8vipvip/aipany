@@ -2,11 +2,130 @@
 
 > 本文档记录重要业务逻辑、框架、协议和架构决策。后续涉及架构、协议或核心运行逻辑的修改必须同步更新本文件。
 
+## 2026-07-21 · v0.4.5 Realtime First-Audio Latency & Compact LLM Console
+
+### 目标
+
+生产 E2E 已证明完整 `ASR → LLM → TTS` 链路可用，但原先只展示“完整测试总耗时”，容易把测试语音播放时间和整段 TTS 生成时间误认为用户等待时间。
+
+v0.4.5 将实时语音体验的核心指标明确为：
+
+```text
+Speech End
+→ Server VAD Speech Stopped
+→ Transcript Final
+→ LLM First Token
+→ First PCM Audio
+```
+
+首要 KPI：
+
+```text
+Speech End → First PCM Audio
+```
+
+即用户真正说完后，到 AI 第一段可播放音频返回的时间。
+
+### E2E 首响时间轴
+
+管理面 E2E 自检新增以下时间点和分段指标：
+
+- 测试输入语音实际时长；
+- 客户端 Speech End；
+- Server VAD Speech Stopped；
+- VAD endpoint latency；
+- Transcript Final；
+- Speech End → Transcript Final；
+- VAD Stopped → Transcript Final；
+- Transcript Final → LLM First Token；
+- response.audio.started；
+- First binary PCM Audio；
+- LLM First Token → First PCM Audio；
+- Speech End → First PCM Audio；
+- 完整测试总耗时。
+
+注意：当前 Gateway 的公开 `transcript.final` 事件在必要的 Speaker Intelligence 等待之后发送，因此 `VAD Stopped → Transcript Final` 可能同时包含 ASR 收尾和必要的声纹/说话人分析等待。v0.4.5 先精确量化该区间，再根据生产实测决定是否调整 Owner Focus 身份判断的等待策略，避免为了低延迟破坏已注册主人的安全过滤语义。
+
+E2E 测试尾部静音从 1.5 秒缩短为 0.8 秒。该静音仍高于默认 500 ms Qwen Server VAD 静音窗口，但减少了测试脚本自身造成的无意义等待。
+
+### TTS 首段低延迟切块
+
+原 `StreamingTextChunker` 默认等待较完整的 8–32 字文本块再送入 TTS。对于实时对话，这可能造成 LLM 已开始流式输出，但 TTS 仍等待更多文字。
+
+v0.4.5 采用两阶段策略：
+
+```text
+第一段
+→ 4 字后允许在自然停顿标点切分
+→ 最多约 18 字强制送入 TTS
+
+后续段落
+→ 继续使用较大的常规切块
+→ 保持语音自然度和请求效率
+```
+
+第一段支持在中文/英文逗号、句号、问号、感叹号、分号、顿号、冒号等自然停顿处分块，从而降低 `LLM First Token → First PCM Audio`。
+
+### 文本 LLM 控制台紧凑列表
+
+原 Provider Card 默认展开全部配置，一个中转站会占用大量纵向空间。
+
+v0.4.5 改为默认单行列表：
+
+```text
+选择 | 名称 | Base URL | 模型 | Provider 优先级 | 启用开关 | 操作
+```
+
+规则：
+
+- 每个中转站默认只占一行；
+- 启用状态改为左右 Switch；
+- 模型使用一个单行输入框，以逗号分隔；
+- 模型顺序继续代表自动测速后的优先顺序；
+- API Key、Provider 独立首 Token 超时、总超时进入“编辑”展开区；
+- 测速结果表仅在展开详情中显示；
+- Provider 优先级仍由管理员手动控制；
+- Model priority 和协议顺序仍由测速自动生成。
+
+### 中转站测速进度
+
+“测试勾选中转站”不再以一个长时间无反馈的批量请求执行。
+
+浏览器改为按中转站顺序逐个调用现有 Relay Test API，并实时显示：
+
+- 当前第几个 / 总数；
+- 当前正在测试的中转站；
+- 已用时间；
+- 总体进度条；
+- 当前测试阶段说明；
+- 每个中转站完成后的模型可用状态。
+
+单个中转站内部仍执行：
+
+```text
+/models 自动发现
+→ Responses API 流式测试
+→ Chat Completions 流式测试
+→ 只保留双协议均成功的模型
+→ 按首 Token 延迟排序
+```
+
+### 测试
+
+新增回归覆盖：
+
+- PCM 时长计算；
+- 首个 TTS 文本块在自然停顿处提前输出；
+- 首段无标点时达到低延迟阈值后强制输出；
+- 原有长文本切块行为继续有效。
+
+---
+
 ## 2026-07-21 · v0.4.4 LLM Failover Latency & Observability
 
 ### 背景
 
-生产 E2E 发现同一中转站测速首 Token 约 1–2 秒，但完整链路偶发达到 14.259 秒。旧实现的 `preferredRouteKey` 为进程级全局状态且无 TTL，配置重新测速或优先级变化后旧路由仍可能继续优先；同时单路由只能使用静态 12 秒首 Token 超时，管理员无法看到实际 Failover 尝试链。
+生产 E2E 曾出现中转站独立测速首 Token 约 1–2 秒，但完整链路的 LLM 首 Token 偶发达到 14 秒以上。根因之一是旧 `preferredRouteKey` 为进程级全局状态且没有 TTL，配置重新测速或优先级变化后旧成功路由仍可能继续优先。
 
 ### 路由状态隔离
 
@@ -16,20 +135,24 @@
 - 配置保存、Relay Benchmark 或配置导入后主动清空 preferred / health；
 - 最近请求 Trace 保留用于诊断。
 
-因此重新测速、修改 Provider 优先级或模型顺序后，旧的成功路由不会继续压过新配置。
-
 ### 自适应首 Token 超时
 
-Relay Model Tester 将 `benchmarkAt`、`benchmarkScoreMs` 与 `protocolLatencyMs` 持久化到模型配置。最近 24 小时存在对应协议测速时：
+Relay Model Tester 持久化：
+
+```text
+benchmarkAt
+benchmarkScoreMs
+protocolLatencyMs
+```
+
+最近 24 小时存在协议测速时：
 
 ```text
 adaptiveTimeout = max(4000ms, benchmarkFirstToken * 3 + 1000ms)
 effectiveTimeout = min(configuredTimeout, adaptiveTimeout)
 ```
 
-例如协议实测首 Token 约 1000 ms 时，运行时单路由异常等待上限会从默认 12000 ms 收紧为约 4000 ms；管理员配置的更短超时仍然优先。
-
-普通管理页保存配置时会保留服务器已记录的 benchmark metadata，避免浏览器未显式回传测速字段时丢失自适应超时依据。
+普通管理页保存 Provider Pool 时保留 benchmark metadata，避免浏览器未显式回传测速字段时丢失自适应超时依据。
 
 ### Failover Trace
 
@@ -37,47 +160,28 @@ effectiveTimeout = min(configuredTimeout, adaptiveTimeout)
 
 - Provider / Model / Protocol；
 - 实际尝试顺序；
-- 路由首 Token 超时阈值；
+- 首 Token 超时阈值；
 - 实际首 Token；
 - 单路由耗时；
 - 成功 / 失败 / 取消；
 - 失败原因；
 - 最终命中路由。
 
-新增管理接口：
+新增：
 
 ```text
 GET /admin/api/config/llm-routing
 ```
 
-文本 LLM 页面展示实时路由健康、Preferred TTL、自适应超时、测速延迟、失败次数与冷却状态；诊断测试页面展示最近完整 Failover 请求链。管理面 E2E 自检会关联对应 LLM Route Trace，便于直接定位某一次高延迟是哪个中转站、模型或协议造成的。
-
-### 测试
-
-新增回归覆盖：
-
-- 配置指纹变化后旧 preferred 不再覆盖新优先级；
-- 失败路由与成功 fallback 均进入同一 Trace；
-- Benchmark 延迟会生成更短的自适应首 Token Timeout；
-- Routing state reset 清除 preferred / health 且保留历史 Trace。
+文本 LLM 页面展示实时路由健康、Preferred TTL、自适应超时、测速延迟、失败次数和冷却状态；诊断页面展示完整 Failover 请求链。
 
 ---
 
 ## 2026-07-21 · v0.4.3 Admin Console v2 & Provider Diagnostics
 
-### 目标
-
-将 `/admin/config` 从单页长表单升级为分页面运维控制台，并将生产部署后的三类高频操作内置到 Gateway：
-
-1. 完整 ASR → LLM → TTS E2E 自检；
-2. LLM 中转站自动模型发现、双协议兼容测试与首 Token 测速；
-3. 运行时 API 配置和密钥的加密导出 / 恢复。
-
-客户端 Realtime Protocol 不发生变化，所有能力仍属于服务端管理面。
-
 ### 路由化管理控制台
 
-管理界面拆分为独立路径：
+管理界面拆分为：
 
 ```text
 /admin/config
@@ -89,13 +193,11 @@ GET /admin/api/config/llm-routing
 /admin/config/backup
 ```
 
-服务端仍使用同一管理 Token 鉴权模型。浏览器端使用 History API 在页面间切换，Gateway 对 `/admin/config/*` 统一返回管理控制台 Shell，因此不需要额外 Web Server 路由规则。
+服务端仍使用同一 `AIPANY_ADMIN_TOKEN` 鉴权。Gateway 对 `/admin/config/*` 统一返回控制台 Shell。
 
 ### LLM 中转站自动测试
 
-新增 `Relay Model Tester`，将原独立中转站测试工具的核心检测逻辑内置到 Gateway，并针对实时语音增加流式首 Token 延迟指标。
-
-测试流程：
+新增 Relay Model Tester：
 
 ```text
 Provider
@@ -115,21 +217,17 @@ Chat Completions stream test
 
 自动配置规则：
 
-- 只有 `Responses API` 与 `Chat Completions` 都成功并实际返回文本 Token 的模型，才会自动进入 Provider 模型池；
-- Legacy Completions 不属于 Aipany 运行时请求方式，因此不作为自动入池条件；
-- 模型评分为两种协议首 Token 延迟的平均值；
-- 模型按评分从快到慢生成 `priority = 10, 20, 30...`；
-- 每个模型的 `protocols` 按各协议实测首 Token 延迟自动排序；
-- Provider / 中转站优先级仍由管理员手动配置；
-- 管理界面不再为每个模型创建独立配置卡，每个 Provider 只保留一个统一模型输入框和一张测试结果表。
+- 只有 Responses 与 Chat Completions 都实际返回文本 Token 的模型进入池；
+- Legacy Completions 不属于 Aipany 运行时协议，不作为入池条件；
+- 模型按两种协议首 Token 平均值排序；
+- 每个模型的协议顺序按各协议实测首 Token 延迟排序；
+- Provider 优先级由管理员手动设置。
 
-新增接口：
+新增：
 
 ```text
 POST /admin/api/config/relay-test
 ```
-
-请求可以包含多个 `providerIds`，用于批量测试勾选的中转站。测试完成后，符合条件的模型列表和协议顺序会写回运行时 Provider Pool。
 
 ### 管理面 E2E 自检
 
@@ -139,34 +237,19 @@ POST /admin/api/config/relay-test
 POST /admin/api/config/e2e-test
 ```
 
-完整链路：
+链路：
 
 ```text
 Qwen TTS 生成测试语音
-↓
-24 kHz PCM → 16 kHz PCM
-↓
-内部 WebSocket Realtime Session
-↓
-Qwen Realtime ASR
-↓
-LLM Provider Pool
-↓
-Qwen Realtime TTS
-↓
-Binary PCM 返回
+→ 24 kHz PCM 转 16 kHz PCM
+→ 内部 WebSocket Realtime Session
+→ Qwen Realtime ASR
+→ LLM Provider Pool
+→ Qwen Realtime TTS
+→ Binary PCM 返回
 ```
 
-管理页会展示：
-
-- 输入 TTS 生成字节数和耗时；
-- ASR Final 文本；
-- LLM 最终文本；
-- LLM 首 Token 延迟；
-- 返回 TTS PCM 字节数；
-- 完整测试总耗时。
-
-自检使用独立 `deployment-test` 会话，不修改用户声纹、会话历史或设备协议。当前内部自检依赖 `AIPANY_GATEWAY_TOKEN` 作为 Legacy Realtime Token。
+自检使用独立 `deployment-test` 会话，不修改用户声纹、会话历史或设备协议。
 
 ### 加密配置导出与恢复
 
@@ -177,52 +260,29 @@ POST /admin/api/config/export
 POST /admin/api/config/import
 ```
 
-普通 `GET /admin/api/config` 仍然只返回密钥是否已配置，不返回明文。
-
-需要完整导出运行时 API 配置时，管理员提供备份密码，服务端使用：
+普通 `GET /admin/api/config` 只返回密钥是否已配置，不返回明文。完整运行时配置使用：
 
 ```text
 KDF: scrypt
 Cipher: AES-256-GCM
 ```
 
-对完整运行时配置文档加密后返回浏览器下载。
+加密导出。
 
-备份包含：
-
-- DashScope / Qwen Omni 运行时 API 配置；
-- LLM Provider Pool 和 Provider API Key；
-- Remote GPU 运行时配置和 Token。
-
-备份不包含启动级秘密：
+备份包含 AI Provider 运行时配置及其密钥，但不包含：
 
 - `AIPANY_ADMIN_TOKEN`；
 - JWT Secret；
 - 数据库密码；
 - Speaker Identity Encryption Key。
 
-导入时使用相同密码解密并验证 GCM Authentication Tag，再原子写回运行时配置文件。
-
-`RuntimeApiConfigStore` 同时增加启动环境 baseline：每次应用完整运行时文档前先恢复 `.env` 基线，再叠加运行时值，从而保证导入或删除配置项时不会残留旧的 `process.env` 值。
-
-### 测试
-
-新增回归覆盖：
-
-- 自动模型发现；
-- 只保留同时通过 Responses 与 Chat Completions 的模型；
-- 根据首 Token 延迟自动生成模型排序和协议顺序；
-- 加密备份中不出现 API Key 明文；
-- 正确密码可以完整恢复运行时配置；
-- 错误密码无法解密备份。
-
 ---
 
 ## 2026-07-21 · v0.4.2 LLM Provider Pool & Failover
 
-### 背景
+### 架构
 
-v0.4.1 之前 Gateway 只支持单个：
+文本 LLM 从单一：
 
 ```text
 LLM_BASE_URL
@@ -230,9 +290,7 @@ LLM_API_KEY
 LLM_MODEL
 ```
 
-真实部署中，中转站可能出现首 Token 延迟异常、请求超时、HTTP 200 但返回非标准内容、同一模型的 Chat Completions / Responses 协议稳定性不同等问题。
-
-v0.4.2 将文本 LLM 层升级为可热更新的 Provider Pool：
+升级为：
 
 ```text
 Realtime Session
@@ -251,156 +309,46 @@ Provider B
   └─ Model D / Chat Completions
 ```
 
-### 配置模型
+配置支持：
 
-运行时配置新增结构化 `llmProviderPool`：
+- 多 Provider；
+- 每个 Provider 多 Model；
+- `chat_completions` / `responses` 双协议；
+- Provider / Model priority；
+- 协议顺序；
+- 全局及 Provider 独立首 Token / 总超时；
+- 失败冷却；
+- 单次最大尝试数。
 
-- 一个 Pool 可以包含多个 Provider / 中转站；
-- 每个 Provider 可以配置多个模型；
-- 每个模型可以启用 `chat_completions`、`responses` 或两者；
-- Provider 和 Model 都有独立优先级，数字越小越先尝试；
-- 协议数组顺序代表同模型的协议优先级；
-- Provider 可以覆盖全局首 Token 超时和总超时。
+### Failover 边界
 
-全局策略：
-
-```text
-firstTokenTimeoutMs
-  首个有效文本 Token 的等待上限
-
-totalTimeoutMs
-  单条路由完整请求的总时间上限
-
-cooldownMs
-  失败路由进入冷却的时间
-
-maxAttempts
-  单次用户请求最多尝试的路由组合数量
-```
-
-### Failover 规则
-
-路由顺序按以下信号综合排序：
-
-1. 未处于冷却的路由优先；
-2. 上一次成功路由在健康时优先复用；
-3. Provider priority；
-4. Model priority；
-5. 模型配置中的协议顺序。
-
-以下情况视为路由失败，可以自动切换到下一条路由：
+以下情况在尚未向用户输出文字前允许切换：
 
 - 首 Token 超时；
 - 总请求超时；
 - HTTP 非 2xx；
 - 流式响应体缺失；
-- SSE 结束但没有任何有效文本 Token；
+- SSE 结束但没有文本 Token；
 - 连接或协议解析错误。
 
-重要边界：
+重要规则：
 
 ```text
-在尚未向用户输出任何文本 Token 之前失败
-→ 允许自动切换
+尚未输出任何文字
+→ 可以 Failover
 
-已经向用户输出文本后中途失败
-→ 不重新调用下一模型
-→ 避免重复回答或上下文分叉
+已经输出文字后中途失败
+→ 不重新调用另一模型
+→ 避免重复回答和上下文分叉
 ```
 
-### 多协议支持
-
-`LlmProviderPool` 原生支持：
-
-```text
-POST /chat/completions
-stream=true
-→ choices[0].delta.content
-
-POST /responses
-stream=true
-→ response.output_text.delta
-```
-
-因此同一个模型可以配置：
-
-```text
-首选 Responses
-↓ 失败
-备用 Chat Completions
-```
-
-也可以反过来。
-
-### 运行时配置与兼容迁移
-
-`RuntimeApiConfigStore` 新增结构化 Provider Pool 持久化。
-
-旧版单中转配置不会失效：
-
-```text
-如果还没有 llmProviderPool
-↓
-自动读取 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL
-↓
-构造 Legacy Provider
-```
-
-用户第一次在管理页面保存 Provider Pool 后，新建 WebSocket 会话自动使用新的多路由配置，不需要重新构建 Docker 镜像。
-
-Provider API Key 的读取接口只返回：
-
-```text
-apiKeyConfigured: true / false
-```
-
-不会将已保存密钥返回浏览器；页面中 Provider ID 保持不变且 Key 输入框留空时，服务端保留原密钥。
-
-### 管理页面
-
-`/admin/config` 的单 LLM 配置升级为可视化 Provider Pool：
-
-- 添加 / 删除中转站；
-- 添加 / 删除模型；
-- Provider / Model 优先级；
-- 首选请求协议；
-- 同模型第二协议备用；
-- 全局首 Token 超时；
-- 全局总超时；
-- 冷却时间；
-- 最大尝试次数；
-- Provider 独立超时覆盖。
-
-新增服务端测试接口：
-
-```text
-POST /admin/api/config/llm-test
-```
-
-可以从管理页面直接测试指定：
-
-```text
-Provider + Model + Protocol
-```
-
-### 测试
-
-新增回归覆盖：
-
-- 第一条路由首 Token 超时后切换到下一 Provider；
-- Responses API `response.output_text.delta` 流式解析；
-- HTTP 200 但无文本 Token 时继续 Failover；
-- Provider Pool API Key snapshot 脱敏；
-- Provider Key 留空更新时保留原密钥；
-- Provider Pool 持久化并在进程环境中热应用。
+旧单中转配置会自动迁移为 Legacy Provider。Provider API Key 的公开 snapshot 只返回 `apiKeyConfigured`。
 
 ---
 
 ## 2026-07-20 · v0.4.1 Server Runtime Configuration Console
 
-### 目标
-
-将 AI Provider 配置从“部署前必须手工编辑 `.env`”调整为两层配置模型：
+### 两层配置模型
 
 ```text
 启动级配置（.env）
@@ -416,130 +364,38 @@ Provider + Model + Protocol
 └─ Remote GPU / SepFormer
 ```
 
-这样生产服务器可以先完成 Docker 部署，再通过浏览器配置或更换 AI Provider，不需要重新构建镜像。
-
-### 服务端管理入口
-
-新增页面：
+新增：
 
 ```text
 GET /admin/config
-```
-
-新增管理 API：
-
-```text
 GET /admin/api/config
 PUT /admin/api/config
 ```
 
-管理 API 由 `AIPANY_ADMIN_TOKEN` 保护。
+运行时配置由 `RuntimeApiConfigStore` 管理：
 
-页面可配置：
+- 白名单字段；
+- 启动恢复；
+- 注入 `process.env`；
+- 临时文件 + rename 原子写入；
+- 文件权限 `0600`；
+- API 密钥读取脱敏。
 
-- DashScope Key、Workspace、ASR/TTS 地址和模型；
-- Qwen Omni Key、地址、模型及 Cloud Audio 开关；
-- OpenAI-compatible LLM 地址、Key 和模型；
-- Remote GPU 地址、Token、超时和触发策略。
-
-数据库、JWT、声纹加密密钥等启动级配置不允许通过页面修改。
-
-### RuntimeApiConfigStore
-
-新增 `RuntimeApiConfigStore`，负责：
-
-1. 只接受白名单中的运行时配置项；
-2. 启动时从持久化文件恢复配置；
-3. 将恢复或新保存的配置注入当前进程环境；
-4. 使用临时文件加 rename 的方式原子写入；
-5. 持久化文件权限设置为 `0600`；
-6. 对读取接口隐藏 API 密钥具体值，只返回是否已经配置。
-
-默认文件：
+默认持久化路径：
 
 ```text
 /data/runtime-api-config.json
 ```
 
-可通过 `AIPANY_RUNTIME_CONFIG_PATH` 覆盖。
+Docker 使用独立 `runtime-config:/data` 卷，因此容器重建后配置保留。
 
-Docker Compose 新增独立卷：
-
-```text
-runtime-config:/data
-```
-
-因此容器重建后运行时配置仍然保留。
-
-### 配置热更新边界
-
-Gateway 启动级配置仍在进程启动时固定：
-
-- 监听端口；
-- Gateway / JWT 鉴权；
-- PostgreSQL；
-- Speaker Identity Store。
-
-AI Provider 配置则按新的 WebSocket 连接重新执行 `loadConfig()`。
-
-因此页面保存后：
-
-```text
-保存运行时配置
-↓
-process.env 更新
-↓
-新建 WebSocket 连接
-↓
-读取最新 DashScope / LLM / Cloud / Remote 参数
-```
-
-不需要重新构建镜像。
-
-### 空 API 配置启动
-
-v0.4.1 放宽启动校验：
-
-- `DASHSCOPE_API_KEY` 可以为空；
-- `LLM_API_KEY` 可以为空；
-- 空字符串形式的可选 URL 会被视为未配置，而不是非法 URL。
-
-这样 Gateway 可以先启动管理页面，再完成 AI Provider 配置。
-
-### 安全边界
-
-- `AIPANY_ADMIN_TOKEN` 只存在于服务端启动环境；
-- 管理 API 使用 Bearer Token；
-- Token 比较使用 timing-safe comparison；
-- 已保存的 API 密钥不会通过 GET 接口返回浏览器；
-- 密码输入框留空表示保留现有值；
-- Runtime 配置文件依赖宿主机权限和 Docker Volume 隔离保护，安全边界与传统服务器 `.env` 类似；
-- 数据库、JWT、声纹加密主密钥继续只允许由 `.env` / Secret Manager 提供。
-
-### 新增环境变量
-
-```text
-AIPANY_ADMIN_TOKEN
-AIPANY_RUNTIME_CONFIG_PATH
-```
-
-### 测试
-
-新增回归覆盖：
-
-- Admin Token 正确/错误认证；
-- Runtime 配置写入与重新加载；
-- API 密钥不出现在公开 snapshot；
-- 配置文件权限为 `0600`；
-- 测试完成后恢复被修改的环境变量。
+启动级数据库、JWT、声纹加密密钥不能通过网页修改。
 
 ---
 
 ## 2026-07-20 · v0.4 Hybrid Cloud Audio Intelligence
 
 ### 架构
-
-v0.4 将重型 Audio Intelligence 拆分为：
 
 ```text
                     Aipany Audio Intelligence
@@ -560,85 +416,25 @@ v0.4 将重型 Audio Intelligence 拆分为：
 
 核心原则：增强能力失败不能阻断实时语音主链路。
 
-### Hybrid Provider
+`HybridAudioIntelligenceProvider`：
 
-新增 `HybridAudioIntelligenceProvider`：
+- Local Provider：Speaker Embedding、基础 Diarization、Identity；
+- Cloud Provider：Environment Intelligence、Diarized Transcription；
+- Remote GPU Provider：SepFormer、Target Speaker Extraction。
 
-- Local Provider 负责 Speaker Embedding、基础 Diarization 和身份相关数据；
-- Cloud Provider 负责 Environment Intelligence 与 Diarized Transcription；
-- Remote GPU Provider 负责按策略调用 SepFormer / Target Speaker Extraction；
-- Cloud transcript 按时间区间合并回本地 diarization segment；
-- Local embedding 始终保留，继续支持 Person / Owner Identity。
+Qwen Omni 云端支路使用 PCM → WAV → Base64 input_audio 进行环境、事件和多人转写增强，不替代低延迟 Qwen Realtime ASR。
 
-Gateway 继续使用兼容名称 `HttpSpeakerIntelligenceProvider`，包根将其映射到 `AutoHybridSpeakerIntelligenceProvider`，因此 RealtimeSession 不需要大规模重写。
+低配 4 vCPU / 4 GB / 无 GPU 部署原则：
 
-### Qwen Omni Cloud Audio
-
-新增 `QwenOmniCloudAudioProvider`：
-
-```text
-PCM utterance
-↓
-WAV
-↓
-Base64 input_audio
-↓
-Qwen Omni
-↓
-Environment + Audio Events + Diarized Transcript
-```
-
-Cloud Intelligence 是增强支路，不替代低延迟 Qwen Realtime ASR。
-
-### Remote GPU
-
-新增 `HttpRemoteTargetSpeakerProvider`，复用：
-
-```text
-POST /v1/analyze
-```
-
-支持：
-
-```text
-overlap_only
-overlap_or_multi_speaker
-always_owner_focus
-```
-
-默认 `overlap_or_multi_speaker`。
-
-### 低配服务器部署
-
-对于 4 vCPU / 4 GB RAM / 无 GPU：
-
-本地保留：
-
-- Realtime Gateway；
-- PostgreSQL + pgvector；
-- ECAPA；
-- 基础 Diarization；
-- Audio Front-End；
-- Social Conversation Manager。
-
-云端承担：
-
-- Environment Intelligence；
-- Audio Event Understanding；
-- Diarized Transcription。
-
-Remote GPU 承担：
-
-- SepFormer Speech Separation；
-- Target Speaker Extraction。
-
-Gateway 能力请求开关和本地模型加载开关从 v0.4 起正式解耦。
+- 本地保留 Gateway、PostgreSQL + pgvector、ECAPA、基础 Diarization、Audio Front-End、Social Conversation Manager；
+- 云端承担 Environment、Audio Events、Diarized Transcription；
+- Remote GPU 承担 SepFormer / Target Speaker Extraction。
 
 ---
 
 ## 2026-07-20 · v0.3 Complete Social Voice Architecture
 
-v0.3 建立完整 Social Voice 基线：
+建立完整 Social Voice 基线：
 
 - ECAPA Speaker Embedding；
 - 在线 Diarization；

@@ -1,3 +1,5 @@
+import { ADMIN_CONSOLE_ENHANCEMENTS } from "./admin-console-enhancements.js";
+
 function adminFailoverUiClient(): void {
   type RoutingData = {
     preferredRoute?: { key: string; remainingMs: number };
@@ -171,4 +173,4 @@ function adminFailoverUiClient(): void {
   }, 5000);
 }
 
-export const ADMIN_FAILOVER_UI = `(${adminFailoverUiClient.toString()})();`;
+export const ADMIN_FAILOVER_UI = `(${adminFailoverUiClient.toString()})();\n${ADMIN_CONSOLE_ENHANCEMENTS}`;

@@ -18,9 +18,20 @@ export interface AdminE2eTestResult {
   llmRouteTrace?: LlmRequestTrace;
   timings: {
     inputTtsMs: number;
+    inputSpeechDurationMs: number;
     sessionReadyMs: number;
+    speechEndMs?: number;
+    serverVadStoppedMs?: number;
+    vadEndpointMs?: number;
     asrFinalMs?: number;
+    asrAfterSpeechEndMs?: number;
+    asrAfterVadStoppedMs?: number;
     llmFirstTokenMs?: number;
+    llmFirstTokenAfterSpeechEndMs?: number;
+    responseAudioStartedMs?: number;
+    firstAudioMs?: number;
+    ttsFirstAudioAfterLlmTokenMs?: number;
+    speechEndToFirstAudioMs?: number;
     totalMs: number;
   };
 }
@@ -30,8 +41,12 @@ interface RealtimeRoundTripResult {
   answerText: string;
   responseAudioBytes: number;
   sessionReadyMs: number;
+  speechEndMs?: number;
+  serverVadStoppedMs?: number;
   asrFinalMs?: number;
   llmFirstTokenMs?: number;
+  responseAudioStartedMs?: number;
+  firstAudioMs?: number;
   responseCreatedAt?: number;
 }
 
@@ -48,12 +63,15 @@ export async function runAdminE2eTest(): Promise<AdminE2eTestResult> {
   if (!inputAudio24k.length) throw new Error("测试输入 TTS 没有生成音频");
 
   const pcm16k = downsample24kTo16k(inputAudio24k);
-  const trailingSilence = Buffer.alloc(Math.floor(16000 * 2 * 1.5));
+  const inputSpeechDurationMs = pcmDurationMs(pcm16k, 16000, 1);
+  // 只保留略高于默认 500 ms Server VAD 的安全余量，避免诊断脚本人为增加完整耗时。
+  const trailingSilence = Buffer.alloc(Math.floor(16000 * 2 * 0.8));
   const testAudio = Buffer.concat([pcm16k, trailingSilence]);
   const result = await runRealtimeRoundTrip({
     token: gatewayToken,
     port: config.server.port,
     audio: testAudio,
+    speechBytes: pcm16k.length,
     startedAt,
   });
 
@@ -62,6 +80,17 @@ export async function runAdminE2eTest(): Promise<AdminE2eTestResult> {
   const llmRouteTrace = routing.recentRequests
     .filter((trace) => trace.startedAt >= traceBoundary - 500)
     .sort((a, b) => Math.abs(a.startedAt - traceBoundary) - Math.abs(b.startedAt - traceBoundary))[0];
+
+  const asrAfterSpeechEndMs = diff(result.asrFinalMs, result.speechEndMs);
+  const vadEndpointMs = diff(result.serverVadStoppedMs, result.speechEndMs);
+  const asrAfterVadStoppedMs = diff(result.asrFinalMs, result.serverVadStoppedMs);
+  const llmFirstTokenAfterSpeechEndMs = result.llmFirstTokenMs === undefined || asrAfterSpeechEndMs === undefined
+    ? undefined
+    : asrAfterSpeechEndMs + result.llmFirstTokenMs;
+  const ttsFirstAudioAfterLlmTokenMs = diff(result.firstAudioMs, result.asrFinalMs === undefined || result.llmFirstTokenMs === undefined
+    ? undefined
+    : result.asrFinalMs + result.llmFirstTokenMs);
+  const speechEndToFirstAudioMs = diff(result.firstAudioMs, result.speechEndMs);
 
   return {
     ok: Boolean(result.transcript && result.answerText && result.responseAudioBytes > 0),
@@ -72,9 +101,20 @@ export async function runAdminE2eTest(): Promise<AdminE2eTestResult> {
     llmRouteTrace,
     timings: {
       inputTtsMs,
+      inputSpeechDurationMs,
       sessionReadyMs: result.sessionReadyMs,
+      speechEndMs: result.speechEndMs,
+      serverVadStoppedMs: result.serverVadStoppedMs,
+      vadEndpointMs,
       asrFinalMs: result.asrFinalMs,
+      asrAfterSpeechEndMs,
+      asrAfterVadStoppedMs,
       llmFirstTokenMs: result.llmFirstTokenMs,
+      llmFirstTokenAfterSpeechEndMs,
+      responseAudioStartedMs: result.responseAudioStartedMs,
+      firstAudioMs: result.firstAudioMs,
+      ttsFirstAudioAfterLlmTokenMs,
+      speechEndToFirstAudioMs,
       totalMs: Date.now() - startedAt,
     },
   };
@@ -108,6 +148,7 @@ async function runRealtimeRoundTrip(input: {
   token: string;
   port: number;
   audio: Buffer;
+  speechBytes: number;
   startedAt: number;
 }): Promise<RealtimeRoundTripResult> {
   return await withTimeout(async () => await new Promise<RealtimeRoundTripResult>((resolve, reject) => {
@@ -116,9 +157,13 @@ async function runRealtimeRoundTrip(input: {
     let answerText = "";
     let responseAudioBytes = 0;
     let sessionReadyMs = 0;
+    let speechEndMs: number | undefined;
+    let serverVadStoppedMs: number | undefined;
     let asrFinalMs: number | undefined;
     let llmStartedAt = 0;
     let llmFirstTokenMs: number | undefined;
+    let responseAudioStartedMs: number | undefined;
+    let firstAudioMs: number | undefined;
     let responseCreatedAt: number | undefined;
     let settled = false;
 
@@ -127,7 +172,19 @@ async function runRealtimeRoundTrip(input: {
       settled = true;
       try { ws.close(); } catch { /* ignore */ }
       if (error) reject(error);
-      else resolve({ transcript, answerText, responseAudioBytes, sessionReadyMs, asrFinalMs, llmFirstTokenMs, responseCreatedAt });
+      else resolve({
+        transcript,
+        answerText,
+        responseAudioBytes,
+        sessionReadyMs,
+        speechEndMs,
+        serverVadStoppedMs,
+        asrFinalMs,
+        llmFirstTokenMs,
+        responseAudioStartedMs,
+        firstAudioMs,
+        responseCreatedAt,
+      });
     };
 
     ws.on("open", () => {
@@ -154,6 +211,7 @@ async function runRealtimeRoundTrip(input: {
 
     ws.on("message", (raw, isBinary) => {
       if (isBinary) {
+        if (firstAudioMs === undefined) firstAudioMs = Date.now() - input.startedAt;
         responseAudioBytes += Buffer.from(raw as Buffer).length;
         return;
       }
@@ -164,7 +222,13 @@ async function runRealtimeRoundTrip(input: {
 
       if (type === "session.ready") {
         sessionReadyMs = Date.now() - input.startedAt;
-        void streamAudio(ws, input.audio).catch((error) => finish(error instanceof Error ? error : new Error(String(error))));
+        void streamAudio(ws, input.audio, input.speechBytes, () => {
+          if (speechEndMs === undefined) speechEndMs = Date.now() - input.startedAt;
+        }).catch((error) => finish(error instanceof Error ? error : new Error(String(error))));
+        return;
+      }
+      if (type === "input_audio_buffer.speech_stopped") {
+        if (serverVadStoppedMs === undefined) serverVadStoppedMs = Date.now() - input.startedAt;
         return;
       }
       if (type === "transcript.final") {
@@ -181,6 +245,10 @@ async function runRealtimeRoundTrip(input: {
         const delta = typeof event.delta === "string" ? event.delta : "";
         if (delta && llmFirstTokenMs === undefined && llmStartedAt) llmFirstTokenMs = Date.now() - llmStartedAt;
         answerText += delta;
+        return;
+      }
+      if (type === "response.audio.started") {
+        if (responseAudioStartedMs === undefined) responseAudioStartedMs = Date.now() - input.startedAt;
         return;
       }
       if (type === "error") {
@@ -214,11 +282,17 @@ function readCurrentProviderPool(config: ReturnType<typeof loadConfig>): LlmProv
   });
 }
 
-async function streamAudio(ws: WebSocket, audio: Buffer): Promise<void> {
+async function streamAudio(ws: WebSocket, audio: Buffer, speechBytes: number, onSpeechEnd: () => void): Promise<void> {
   const frameBytes = Math.floor(16000 * 2 * 0.02);
+  let speechEnded = false;
   for (let offset = 0; offset < audio.length; offset += frameBytes) {
     if (ws.readyState !== WebSocket.OPEN) throw new Error("发送测试音频时 WebSocket 已关闭");
     ws.send(audio.subarray(offset, Math.min(offset + frameBytes, audio.length)));
+    const nextOffset = Math.min(offset + frameBytes, audio.length);
+    if (!speechEnded && nextOffset >= speechBytes) {
+      speechEnded = true;
+      onSpeechEnd();
+    }
     await sleep(20);
   }
 }
@@ -238,6 +312,15 @@ export function downsample24kTo16k(buffer: Buffer): Buffer {
     output.writeInt16LE(Math.max(-32768, Math.min(32767, sample)), i * 2);
   }
   return output;
+}
+
+export function pcmDurationMs(buffer: Buffer, sampleRate: number, channels: number): number {
+  if (sampleRate <= 0 || channels <= 0) return 0;
+  return Math.round(buffer.length / (2 * channels * sampleRate) * 1000);
+}
+
+function diff(later: number | undefined, earlier: number | undefined): number | undefined {
+  return later === undefined || earlier === undefined ? undefined : Math.max(0, later - earlier);
 }
 
 function sleep(ms: number): Promise<void> {
