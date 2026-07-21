@@ -1,9 +1,11 @@
 import type { SessionStartEvent } from "@aipany/protocol";
+import { resolveRequestedVoice } from "../mobile/client-capabilities.js";
 import { RealtimeSession } from "./realtime-session.js";
 
 interface RealtimeSessionInternals {
   asr?: { commit(): void };
   config: {
+    qwen: { ttsModel: string; ttsVoice: string };
     speaker: { analysisWaitMs: number };
     speakerIdentity: { consentRequired: boolean };
   };
@@ -27,17 +29,22 @@ export function resolveOwnerFocusSpeakerAnalysisWaitMs(
  * Low-latency behavior layered on top of the stable RealtimeSession core.
  *
  * - Owner Focus without speaker-identity consent must not block the main ASR -> LLM
- *   path waiting for identity analysis that cannot legally be used anyway. The
- *   analysis promise still continues in the background and can emit environment
- *   and diagnostic events when it completes.
- * - Explicit input_audio_buffer.commit is forwarded to the realtime ASR provider,
- *   allowing clients with local endpoint detection to finish a turn immediately
- *   instead of relying exclusively on server-side VAD silence detection.
+ *   path waiting for identity analysis that cannot legally be used anyway.
+ * - Explicit input_audio_buffer.commit is forwarded to the realtime ASR provider.
+ * - Mobile/web clients can request one of the voices advertised by the server for
+ *   the current realtime TTS model. Unsupported values safely fall back to the
+ *   server-configured voice.
  */
 export class LowLatencyRealtimeSession extends RealtimeSession {
   private configuredOwnerFocusSpeakerAnalysisWaitMs?: number;
 
   override async start(event: SessionStartEvent): Promise<void> {
+    const state = this.internals();
+    state.config.qwen.ttsVoice = resolveRequestedVoice(
+      state.config.qwen.ttsModel,
+      state.config.qwen.ttsVoice,
+      event.session.outputVoice,
+    );
     await super.start(event);
     this.syncOwnerFocusSpeakerAnalysisWait();
   }
