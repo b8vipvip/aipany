@@ -1,4 +1,5 @@
 import { ADMIN_CONSOLE_ENHANCEMENTS } from "./admin-console-enhancements.js";
+import { ADMIN_LIVE_CONFIG_UI } from "./admin-live-config-ui.js";
 
 function adminFailoverUiClient(): void {
   type RoutingData = {
@@ -173,4 +174,4 @@ function adminFailoverUiClient(): void {
   }, 5000);
 }
 
-export const ADMIN_FAILOVER_UI = `(${adminFailoverUiClient.toString()})();\n${ADMIN_CONSOLE_ENHANCEMENTS}`;
+export const ADMIN_FAILOVER_UI = `(${adminFailoverUiClient.toString()})();\n${ADMIN_CONSOLE_ENHANCEMENTS}\n${ADMIN_LIVE_CONFIG_UI}`;
