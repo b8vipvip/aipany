@@ -30,19 +30,18 @@ class RealtimeClient(
         tenantId: String,
         userId: String,
         deviceId: String,
+        settings: AppSettings,
     ) {
         close()
         val url = normalizeWebSocketUrl(serverUrl)
         val requestBuilder = Request.Builder().url(url)
-        if (token.isNotBlank()) {
-            requestBuilder.header("Authorization", "Bearer ${token.trim()}")
-        }
+        if (token.isNotBlank()) requestBuilder.header("Authorization", "Bearer ${token.trim()}")
 
-        onState("正在连接 $url")
+        onState("正在连接 Aipany")
         socket = httpClient.newWebSocket(requestBuilder.build(), object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 connected = true
-                onState("WebSocket 已连接，正在创建会话")
+                onState("安全连接已建立，正在启动实时语音")
                 webSocket.send(
                     JSONObject()
                         .put("type", "session.start")
@@ -53,9 +52,10 @@ class RealtimeClient(
                                 .put("userId", userId)
                                 .put("agentId", "default-agent")
                                 .put("locale", "zh-CN")
-                                .put("assistantAliases", JSONArray(listOf("Aipany", "小派")))
-                                .put("interactionMode", "auto")
-                                .put("socialProactivity", 0.45)
+                                .put("assistantAliases", JSONArray(settings.aliases()))
+                                .put("interactionMode", settings.interactionMode)
+                                .put("socialProactivity", settings.socialProactivity.toDouble())
+                                .put("outputVoice", settings.voiceId)
                                 .put(
                                     "inputAudio",
                                     JSONObject()
@@ -70,7 +70,7 @@ class RealtimeClient(
                                         .put("productId", "aipany-android-v1")
                                         .put("deviceType", "mobile")
                                         .put("platform", "android")
-                                        .put("appVersion", "0.1.0"),
+                                        .put("appVersion", BuildConfig.VERSION_NAME),
                                 ),
                         )
                         .toString(),
@@ -91,13 +91,13 @@ class RealtimeClient(
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
                 connected = false
-                onState("连接正在关闭：$code $reason")
+                onState("连接正在关闭")
                 webSocket.close(code, reason)
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 connected = false
-                onState("连接已关闭：$code $reason")
+                onState("连接已断开")
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
@@ -116,6 +116,11 @@ class RealtimeClient(
     fun commitAudio(): Boolean = sendControl("input_audio_buffer.commit")
 
     fun cancelResponse(): Boolean = sendControl("response.cancel")
+
+    fun setInteractionMode(mode: String): Boolean {
+        if (!connected) return false
+        return socket?.send(JSONObject().put("type", "mode.set").put("mode", mode).toString()) == true
+    }
 
     fun finishSession(): Boolean = sendControl("session.finish")
 
