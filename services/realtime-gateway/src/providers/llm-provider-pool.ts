@@ -46,6 +46,11 @@ export interface LlmStreamOptions {
   onDelta: (delta: string) => Promise<void> | void;
 }
 
+export interface LlmGenerationConfig {
+  temperature: number;
+  maxTokens: number;
+}
+
 interface RouteCandidate {
   key: string;
   provider: LlmProviderConfig;
@@ -65,7 +70,10 @@ const routeHealth = new Map<string, RouteHealth>();
 let preferredRouteKey: string | undefined;
 
 export class LlmProviderPool {
-  constructor(private readonly config: LlmProviderPoolConfig) {}
+  constructor(
+    private readonly config: LlmProviderPoolConfig,
+    private readonly generation: LlmGenerationConfig = { temperature: 0.8, maxTokens: 800 },
+  ) {}
 
   async streamChat(options: LlmStreamOptions): Promise<void> {
     const candidates = orderCandidates(flattenCandidates(this.config));
@@ -149,10 +157,11 @@ export class LlmProviderPool {
 
     try {
       if (candidate.protocol === "chat_completions") {
-        await streamChatCompletions(candidate, options.messages, controller.signal, onDelta);
+        await streamChatCompletions(candidate, options.messages, controller.signal, onDelta, this.generation);
       } else {
-        await streamResponses(candidate, options.messages, controller.signal, onDelta);
+        await streamResponses(candidate, options.messages, controller.signal, onDelta, this.generation);
       }
+      if (!firstTokenReceived) throw new Error("流式响应结束但未收到任何文本 Token");
     } catch (error) {
       if (firstTokenTimedOut) throw new Error(`首 Token 超时（${firstTokenTimeoutMs}ms）`);
       if (totalTimedOut) throw new Error(`总请求超时（${totalTimeoutMs}ms）`);
@@ -218,7 +227,7 @@ export async function testLlmRoute(input: {
     totalTimeoutMs: input.totalTimeoutMs,
     cooldownMs: 1000,
     maxAttempts: 1,
-  });
+  }, { temperature: 0.2, maxTokens: 100 });
   await pool.streamChat({
     messages: [{ role: "user", content: "请只回复：Aipany LLM 测试成功" }],
     signal: new AbortController().signal,
@@ -232,6 +241,7 @@ async function streamChatCompletions(
   messages: ChatMessage[],
   signal: AbortSignal,
   onDelta: (delta: string) => Promise<void> | void,
+  generation: LlmGenerationConfig,
 ): Promise<void> {
   const response = await fetch(`${trimBaseUrl(candidate.provider.baseUrl)}/chat/completions`, {
     method: "POST",
@@ -239,8 +249,8 @@ async function streamChatCompletions(
     body: JSON.stringify({
       model: candidate.model.id,
       messages,
-      temperature: 0.8,
-      max_tokens: 800,
+      temperature: generation.temperature,
+      max_tokens: generation.maxTokens,
       stream: true,
     }),
     signal,
@@ -257,6 +267,7 @@ async function streamResponses(
   messages: ChatMessage[],
   signal: AbortSignal,
   onDelta: (delta: string) => Promise<void> | void,
+  generation: LlmGenerationConfig,
 ): Promise<void> {
   const response = await fetch(`${trimBaseUrl(candidate.provider.baseUrl)}/responses`, {
     method: "POST",
@@ -264,8 +275,8 @@ async function streamResponses(
     body: JSON.stringify({
       model: candidate.model.id,
       input: messages.map((message) => ({ role: message.role, content: message.content })),
-      temperature: 0.8,
-      max_output_tokens: 800,
+      temperature: generation.temperature,
+      max_output_tokens: generation.maxTokens,
       stream: true,
     }),
     signal,
@@ -364,12 +375,12 @@ function flattenCandidates(config: LlmProviderPoolConfig): RouteCandidate[] {
 function orderCandidates(candidates: RouteCandidate[]): RouteCandidate[] {
   const now = Date.now();
   return [...candidates].sort((a, b) => {
-    const aPreferred = a.key === preferredRouteKey ? -1 : 0;
-    const bPreferred = b.key === preferredRouteKey ? -1 : 0;
-    if (aPreferred !== bPreferred) return aPreferred - bPreferred;
     const aCooling = (routeHealth.get(a.key)?.cooldownUntil ?? 0) > now ? 1 : 0;
     const bCooling = (routeHealth.get(b.key)?.cooldownUntil ?? 0) > now ? 1 : 0;
     if (aCooling !== bCooling) return aCooling - bCooling;
+    const aPreferred = a.key === preferredRouteKey ? -1 : 0;
+    const bPreferred = b.key === preferredRouteKey ? -1 : 0;
+    if (aPreferred !== bPreferred) return aPreferred - bPreferred;
     if (a.provider.priority !== b.provider.priority) return a.provider.priority - b.provider.priority;
     if (a.model.priority !== b.model.priority) return a.model.priority - b.model.priority;
     return a.model.protocols.indexOf(a.protocol) - b.model.protocols.indexOf(b.protocol);
@@ -389,6 +400,7 @@ function markRouteSuccess(key: string): void {
 
 function markRouteFailure(key: string, cooldownMs: number, error: string): void {
   const previous = routeHealth.get(key);
+  if (preferredRouteKey === key) preferredRouteKey = undefined;
   routeHealth.set(key, {
     failures: (previous?.failures ?? 0) + 1,
     cooldownUntil: Date.now() + cooldownMs,
