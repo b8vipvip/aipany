@@ -42,10 +42,22 @@ jobs:
           gradle-version: "8.9"
 
       - name: Run Android unit tests
-        run: gradle -p apps/android testDebugUnitTest --stacktrace
+        shell: bash
+        run: |
+          set +e
+          gradle -p apps/android testDebugUnitTest --console=plain > /tmp/aipany-android-test.log 2>&1
+          status=$?
+          tail -n 180 /tmp/aipany-android-test.log
+          exit $status
 
       - name: Build debug APK
-        run: gradle -p apps/android assembleDebug --stacktrace
+        shell: bash
+        run: |
+          set +e
+          gradle -p apps/android assembleDebug --console=plain > /tmp/aipany-android-build.log 2>&1
+          status=$?
+          tail -n 180 /tmp/aipany-android-build.log
+          exit $status
 
       - name: Prepare artifact
         run: |
