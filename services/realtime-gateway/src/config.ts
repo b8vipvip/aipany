@@ -15,6 +15,8 @@ const envSchema = z.object({
   AIPANY_MOBILE_PREVIEW_ENABLED: booleanString.default("false"),
   AIPANY_MOBILE_PREVIEW_TOKEN_TTL_SECONDS: z.coerce.number().int().min(300).max(86400).default(21600),
   AIPANY_MOBILE_PREVIEW_TENANT: z.string().min(1).default("mobile-preview"),
+  AIPANY_REALTIME_ENGINE: z.enum(["auto", "cascaded", "omni_realtime"]).default("auto"),
+  AIPANY_OBSERVABILITY_PATH: z.string().default("/data/observability/events.jsonl"),
 
   DASHSCOPE_API_KEY: z.string().default(""),
   DASHSCOPE_WORKSPACE_ID: optionalString,
@@ -31,6 +33,15 @@ const envSchema = z.object({
   QWEN_TTS_LANGUAGE: z.string().default("Chinese"),
   QWEN_TTS_SAMPLE_RATE: z.coerce.number().int().default(24000),
   QWEN_TTS_OPTIMIZE_INSTRUCTIONS: booleanString.default("false"),
+
+  QWEN_OMNI_API_KEY: z.string().default(""),
+  QWEN_OMNI_REALTIME_ENABLED: booleanString.default("false"),
+  QWEN_OMNI_REALTIME_BASE_URL: optionalUrl,
+  QWEN_OMNI_REALTIME_MODEL: z.string().default("qwen3.5-omni-plus-realtime"),
+  QWEN_OMNI_REALTIME_VOICE: z.string().default("Cherry"),
+  QWEN_OMNI_REALTIME_TURN_DETECTION: z.enum(["server_vad", "semantic_vad"]).default("server_vad"),
+  QWEN_OMNI_REALTIME_VAD_THRESHOLD: z.coerce.number().min(-1).max(1).default(0.2),
+  QWEN_OMNI_REALTIME_SILENCE_MS: z.coerce.number().int().min(200).max(6000).default(350),
 
   LLM_BASE_URL: z.string().url().default("https://api.openai.com/v1"),
   LLM_API_KEY: z.string().default(""),
@@ -120,6 +131,10 @@ export function loadConfig() {
         ttlSeconds: env.AIPANY_MOBILE_PREVIEW_TOKEN_TTL_SECONDS,
         tenantId: env.AIPANY_MOBILE_PREVIEW_TENANT,
       },
+      realtimeEngine: env.AIPANY_REALTIME_ENGINE,
+    },
+    observability: {
+      filePath: env.AIPANY_OBSERVABILITY_PATH,
     },
     qwen: {
       apiKey: env.DASHSCOPE_API_KEY,
@@ -135,6 +150,17 @@ export function loadConfig() {
       ttsLanguage: env.QWEN_TTS_LANGUAGE,
       ttsSampleRate: env.QWEN_TTS_SAMPLE_RATE,
       optimizeInstructions: env.QWEN_TTS_OPTIMIZE_INSTRUCTIONS,
+    },
+    qwenOmniRealtime: {
+      enabled: env.QWEN_OMNI_REALTIME_ENABLED,
+      apiKey: env.QWEN_OMNI_API_KEY || env.DASHSCOPE_API_KEY,
+      workspaceId: env.DASHSCOPE_WORKSPACE_ID,
+      baseUrl: env.QWEN_OMNI_REALTIME_BASE_URL ?? workspaceBase,
+      model: env.QWEN_OMNI_REALTIME_MODEL,
+      voice: env.QWEN_OMNI_REALTIME_VOICE,
+      turnDetection: env.QWEN_OMNI_REALTIME_TURN_DETECTION,
+      vadThreshold: env.QWEN_OMNI_REALTIME_VAD_THRESHOLD,
+      silenceMs: env.QWEN_OMNI_REALTIME_SILENCE_MS,
     },
     llm: {
       baseUrl: env.LLM_BASE_URL.replace(/\/$/, ""),
