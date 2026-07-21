@@ -20,7 +20,10 @@ export class OpenAiCompatibleLlm {
   private readonly pool: LlmProviderPool;
 
   constructor(private readonly config: OpenAiCompatibleLlmConfig) {
-    this.pool = new LlmProviderPool(readProviderPool(config));
+    this.pool = new LlmProviderPool(readProviderPool(config), {
+      temperature: config.temperature,
+      maxTokens: config.maxTokens,
+    });
   }
 
   async streamChat(options: {
