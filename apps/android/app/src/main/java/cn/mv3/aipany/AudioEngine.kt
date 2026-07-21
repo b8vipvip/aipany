@@ -22,7 +22,7 @@ class AudioEngine(
     companion object {
         const val INPUT_SAMPLE_RATE = 16_000
         const val OUTPUT_SAMPLE_RATE = 24_000
-        private const val FRAME_SAMPLES = 320 // 20 ms at 16 kHz
+        private const val FRAME_SAMPLES = 320
     }
 
     private val captureExecutor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -32,18 +32,24 @@ class AudioEngine(
     @Volatile private var running = false
     @Volatile private var released = false
     @Volatile private var assistantSpeaking = false
+    @Volatile private var bargeInEnabled = true
 
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
 
     private val endpointDetector = EndpointDetector(
         onSpeechStarted = {
-            if (assistantSpeaking) interruptPlayback()
+            if (assistantSpeaking && bargeInEnabled) interruptPlayback()
             onLocalSpeechStarted()
         },
         onEndpointDetected = onEndpointDetected,
         onLevel = onLevel,
     )
+
+    fun updatePreferences(settings: AppSettings) {
+        bargeInEnabled = settings.bargeInEnabled
+        endpointDetector.setProfile(settings.endpointProfile)
+    }
 
     fun start() {
         if (running || released) return
@@ -149,7 +155,6 @@ class AudioEngine(
                 track.flush()
                 track.play()
             } catch (_: IllegalStateException) {
-                // The stream may already be stopping; the next response will recreate audio naturally.
             }
         }
     }
