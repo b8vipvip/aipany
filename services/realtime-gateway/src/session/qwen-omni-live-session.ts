@@ -23,6 +23,7 @@ export class QwenOmniLiveSession {
   readonly id: string;
   private provider?: QwenOmniRealtimeClient;
   private started = false;
+  private providerReady = false;
   private closed = false;
   private mode: InteractionMode = "auto";
   private aliases: string[] = ["Aipany", "小派"];
@@ -56,15 +57,6 @@ export class QwenOmniLiveSession {
     this.socialProactivity = event.session.socialProactivity;
     this.systemPrompt = event.session.systemPrompt?.trim() || this.config.conversation.defaultSystemPrompt;
     const voice = event.session.outputVoice?.trim() || this.config.qwenOmniRealtime.voice;
-
-    this.send({
-      type: "session.created",
-      sessionId: this.id,
-      inputAudio: INPUT_AUDIO_FORMAT,
-      outputAudio: OUTPUT_AUDIO_FORMAT,
-    });
-    this.sendModeState();
-    this.send({ type: "speaker.consent.updated", granted: false });
 
     const provider = new QwenOmniRealtimeClient({
       apiKey: this.config.qwenOmniRealtime.apiKey,
@@ -134,15 +126,29 @@ export class QwenOmniLiveSession {
     });
     provider.on("error", (error) => {
       this.telemetry?.event("omni.error", { message: error.message }, "error", "omni");
-      this.sendError("OMNI_REALTIME_ERROR", error.message, true);
+      // Before session.ready the server may transparently fall back to the
+      // cascaded engine, so do not leak a transient upstream startup error to
+      // the client. After ready it is a real live-session error and is surfaced.
+      if (this.providerReady) this.sendError("OMNI_REALTIME_ERROR", error.message, true);
     });
     provider.on("close", (code, reason) => {
       if (this.closed) return;
       this.telemetry?.event("omni.closed", { code, reason }, code === 1000 ? "info" : "warn", "omni");
-      this.sendError("OMNI_REALTIME_CLOSED", `Qwen Omni Realtime 连接关闭：${code} ${reason}`.trim(), true);
+      if (this.providerReady) {
+        this.sendError("OMNI_REALTIME_CLOSED", `Qwen Omni Realtime 连接关闭：${code} ${reason}`.trim(), true);
+      }
     });
 
     await provider.connect();
+    this.providerReady = true;
+    this.send({
+      type: "session.created",
+      sessionId: this.id,
+      inputAudio: INPUT_AUDIO_FORMAT,
+      outputAudio: OUTPUT_AUDIO_FORMAT,
+    });
+    this.sendModeState();
+    this.send({ type: "speaker.consent.updated", granted: false });
     this.telemetry?.event("session.ready", { upstream: "qwen-omni-realtime" }, "info", "session");
     this.send({ type: "session.ready", sessionId: this.id });
   }
@@ -211,6 +217,7 @@ export class QwenOmniLiveSession {
     this.closed = true;
     this.provider?.close();
     this.provider = undefined;
+    this.providerReady = false;
   }
 
   private buildInstructions(): string {
