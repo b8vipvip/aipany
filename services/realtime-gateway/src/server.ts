@@ -11,7 +11,7 @@ import { handleAdminConfigHttp } from "./admin/admin-config-http.js";
 import { RuntimeApiConfigStore } from "./admin/runtime-api-config-store.js";
 import { authenticateRequest, type AuthContext } from "./auth.js";
 import { loadConfig, type AppConfig } from "./config.js";
-import { RealtimeSession } from "./session/realtime-session.js";
+import { LowLatencyRealtimeSession } from "./session/low-latency-realtime-session.js";
 
 export function createGatewayServer(
   config: AppConfig,
@@ -35,7 +35,7 @@ export function createGatewayServer(
         response.end(JSON.stringify({
           ok: true,
           service: "aipany-realtime-gateway",
-          version: "0.4.5",
+          version: "0.4.6",
           speakerIdentityStore: config.speakerIdentity.store,
           audioFrontEnd: config.audioFrontEnd.enabled,
           runtimeApiConfig: {
@@ -95,7 +95,7 @@ export function createGatewayServer(
       ws.close(1011, "runtime config invalid");
       return;
     }
-    const session = new RealtimeSession(ws, sessionConfig, identityStore, authContext);
+    const session = new LowLatencyRealtimeSession(ws, sessionConfig, identityStore, authContext);
     let initialized = false;
 
     ws.on("message", (raw, isBinary) => {
