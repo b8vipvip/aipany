@@ -11,6 +11,8 @@ import { handleAdminConfigHttp } from "./admin/admin-config-http.js";
 import { RuntimeApiConfigStore } from "./admin/runtime-api-config-store.js";
 import { authenticateRequest, type AuthContext } from "./auth.js";
 import { loadConfig, type AppConfig } from "./config.js";
+import { getClientVoiceOptions } from "./mobile/client-capabilities.js";
+import { createMobilePreviewIdentity, issueMobilePreviewJwt } from "./mobile/mobile-preview.js";
 import { LowLatencyRealtimeSession } from "./session/low-latency-realtime-session.js";
 
 export function createGatewayServer(
@@ -22,22 +24,88 @@ export function createGatewayServer(
 ) {
   const identityStore = createSpeakerIdentityStore(config);
   const authContexts = new WeakMap<IncomingMessage, AuthContext>();
+  const mobilePreviewRequests = new Map<string, number[]>();
   const httpServer = createServer(async (request, response) => {
     try {
       if (await handleAdminConfigHttp(request, response, runtimeApiConfigStore)) return;
       const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+
+      if (request.method === "GET" && url.pathname === "/v1/mobile/capabilities") {
+        const runtimeConfig = loadConfig();
+        respondJson(response, 200, {
+          version: "0.4.7",
+          previewEnabled: runtimeConfig.server.mobilePreview.enabled,
+          websocketPath: "/v1/realtime",
+          defaults: {
+            outputVoice: runtimeConfig.qwen.ttsVoice,
+            interactionMode: "auto",
+            socialProactivity: 0.45,
+            assistantAliases: ["Aipany", "小派"],
+          },
+          voices: getClientVoiceOptions(runtimeConfig.qwen.ttsModel, runtimeConfig.qwen.ttsVoice),
+          interactionModes: ["auto", "owner_focus", "group"],
+          features: {
+            localEndpointCommit: true,
+            bargeIn: true,
+            realtimeTranscript: true,
+            perSessionVoice: true,
+            socialProactivity: true,
+          },
+        });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/v1/mobile/bootstrap") {
+        const runtimeConfig = loadConfig();
+        if (!runtimeConfig.server.mobilePreview.enabled) {
+          respondJson(response, 403, { error: "mobile_preview_disabled" });
+          return;
+        }
+        const jwtSecret = runtimeConfig.server.auth.jwtSecret;
+        if (!jwtSecret) {
+          respondJson(response, 503, { error: "mobile_preview_requires_jwt" });
+          return;
+        }
+        if (!allowMobilePreviewRequest(request, mobilePreviewRequests)) {
+          respondJson(response, 429, { error: "rate_limited" });
+          return;
+        }
+        const body = await readJsonBody(request);
+        const deviceId = typeof body.deviceId === "string" ? body.deviceId.trim() : "";
+        if (deviceId.length < 8 || deviceId.length > 160) {
+          respondJson(response, 400, { error: "invalid_device_id" });
+          return;
+        }
+        const identity = createMobilePreviewIdentity(deviceId, runtimeConfig.server.mobilePreview.tenantId);
+        const issued = issueMobilePreviewJwt(identity, {
+          jwtSecret,
+          jwtIssuer: runtimeConfig.server.auth.jwtIssuer,
+          jwtAudience: runtimeConfig.server.auth.jwtAudience,
+          ttlSeconds: runtimeConfig.server.mobilePreview.ttlSeconds,
+          tenantId: identity.tenantId,
+        });
+        respondJson(response, 200, {
+          token: issued.token,
+          expiresAt: issued.expiresAt,
+          tenantId: identity.tenantId,
+          userId: identity.userId,
+          websocketPath: "/v1/realtime",
+        });
+        return;
+      }
+
       if (request.method === "GET" && url.pathname === "/health") {
         const snapshot = runtimeApiConfigStore.snapshot();
         const enabledLlmProviders = snapshot.llmProviderPool.providers.filter((provider) =>
           provider.enabled && provider.apiKeyConfigured && provider.models.some((model) => model.enabled),
         );
-        response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-        response.end(JSON.stringify({
+        respondJson(response, 200, {
           ok: true,
           service: "aipany-realtime-gateway",
-          version: "0.4.6",
+          version: "0.4.7",
           speakerIdentityStore: config.speakerIdentity.store,
           audioFrontEnd: config.audioFrontEnd.enabled,
+          mobilePreview: config.server.mobilePreview.enabled,
           runtimeApiConfig: {
             enabled: snapshot.enabled,
             dashscopeConfigured: Boolean(snapshot.secrets.DASHSCOPE_API_KEY?.configured),
@@ -45,18 +113,16 @@ export function createGatewayServer(
             llmProviderCount: enabledLlmProviders.length,
           },
           auth: config.server.auth.jwtSecret ? "jwt" : config.server.auth.legacyToken ? "legacy_token" : "development_open",
-        }));
+        });
         return;
       }
-      response.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
-      response.end(JSON.stringify({ error: "not_found" }));
+      respondJson(response, 404, { error: "not_found" });
     } catch (error) {
       if (response.headersSent) {
         response.end();
         return;
       }
-      response.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
-      response.end(JSON.stringify({ error: "internal_error", message: error instanceof Error ? error.message : String(error) }));
+      respondJson(response, 500, { error: "internal_error", message: error instanceof Error ? error.message : String(error) });
     }
   });
 
@@ -229,6 +295,43 @@ function createSpeakerIdentityStore(config: AppConfig): SpeakerIdentityStore {
     ssl: config.speakerIdentity.databaseSsl,
     maxPoolSize: Math.max(2, Math.min(8, config.speakerIdentity.poolMax)),
   });
+}
+
+async function readJsonBody(request: IncomingMessage): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buffer.length;
+    if (size > 16_384) throw new Error("request body too large");
+    chunks.push(buffer);
+  }
+  if (chunks.length === 0) return {};
+  const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("invalid json body");
+  return parsed as Record<string, unknown>;
+}
+
+function allowMobilePreviewRequest(request: IncomingMessage, state: Map<string, number[]>): boolean {
+  const forwarded = request.headers["x-forwarded-for"];
+  const ip = (typeof forwarded === "string" ? forwarded.split(",")[0]?.trim() : undefined)
+    ?? request.socket.remoteAddress
+    ?? "unknown";
+  const now = Date.now();
+  const cutoff = now - 60 * 60 * 1000;
+  const recent = (state.get(ip) ?? []).filter((timestamp) => timestamp >= cutoff);
+  if (recent.length >= 30) {
+    state.set(ip, recent);
+    return false;
+  }
+  recent.push(now);
+  state.set(ip, recent);
+  return true;
+}
+
+function respondJson(response: import("node:http").ServerResponse, status: number, payload: unknown): void {
+  response.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+  response.end(JSON.stringify(payload));
 }
 
 function sendError(ws: WebSocket, code: string, message: string): void {

@@ -1,6 +1,6 @@
 {
   "name": "@aipany/realtime-gateway",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "@aipany/audio-intelligence": "0.4.0",
-    "@aipany/protocol": "0.3.0",
+    "@aipany/protocol": "0.3.1",
     "ws": "^8.18.0",
     "zod": "^3.24.2"
   },
