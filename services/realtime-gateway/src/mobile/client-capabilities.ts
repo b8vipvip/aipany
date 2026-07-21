@@ -5,6 +5,11 @@ export interface ClientVoiceOption {
   description: string;
 }
 
+const QWEN35_OMNI_REALTIME_VOICES: ClientVoiceOption[] = [
+  { id: "Tina", name: "甜甜 Tina", gender: "female", description: "甜暖自然、陪伴感强，适合实时对话" },
+  { id: "Cindy", name: "林欣宜 Cindy", gender: "female", description: "轻柔甜美，带台湾口音" },
+];
+
 const QWEN3_INSTRUCT_REALTIME_VOICES: ClientVoiceOption[] = [
   { id: "Cherry", name: "芊悦", gender: "female", description: "阳光积极、亲切自然" },
   { id: "Serena", name: "苏瑶", gender: "female", description: "温柔自然" },
@@ -32,8 +37,11 @@ const QWEN3_INSTRUCT_REALTIME_VOICES: ClientVoiceOption[] = [
   { id: "Stella", name: "少女阿月", gender: "female", description: "甜美少女、富有表现力" },
 ];
 
-export function getClientVoiceOptions(ttsModel: string, configuredVoice: string): ClientVoiceOption[] {
-  const normalized = ttsModel.toLowerCase();
+export function getClientVoiceOptions(model: string, configuredVoice: string): ClientVoiceOption[] {
+  const normalized = model.toLowerCase();
+  if (normalized.includes("qwen3.5") && normalized.includes("omni") && normalized.includes("realtime")) {
+    return ensureConfiguredVoice(QWEN35_OMNI_REALTIME_VOICES, configuredVoice);
+  }
   if (normalized.includes("qwen3-tts-instruct-flash-realtime")) {
     return ensureConfiguredVoice(QWEN3_INSTRUCT_REALTIME_VOICES, configuredVoice);
   }
@@ -45,10 +53,10 @@ export function getClientVoiceOptions(ttsModel: string, configuredVoice: string)
   }];
 }
 
-export function resolveRequestedVoice(ttsModel: string, configuredVoice: string, requestedVoice?: string): string {
+export function resolveRequestedVoice(model: string, configuredVoice: string, requestedVoice?: string): string {
   const requested = requestedVoice?.trim();
   if (!requested) return configuredVoice;
-  const allowed = getClientVoiceOptions(ttsModel, configuredVoice);
+  const allowed = getClientVoiceOptions(model, configuredVoice);
   return allowed.some((voice) => voice.id === requested) ? requested : configuredVoice;
 }
 
