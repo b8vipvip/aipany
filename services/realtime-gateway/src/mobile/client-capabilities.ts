@@ -39,8 +39,10 @@ const QWEN3_INSTRUCT_REALTIME_VOICES: ClientVoiceOption[] = [
 
 export function getClientVoiceOptions(model: string, configuredVoice: string): ClientVoiceOption[] {
   const normalized = model.toLowerCase();
-  if (normalized.includes("qwen3.5") && normalized.includes("omni") && normalized.includes("realtime")) {
-    return ensureConfiguredVoice(QWEN35_OMNI_REALTIME_VOICES, configuredVoice);
+  if (isQwen35OmniRealtime(normalized)) {
+    // Do not expose a stale cascaded-TTS voice as valid for Native Live. The
+    // server will safely fall back to the first model-supported voice instead.
+    return QWEN35_OMNI_REALTIME_VOICES.map((voice) => ({ ...voice }));
   }
   if (normalized.includes("qwen3-tts-instruct-flash-realtime")) {
     return ensureConfiguredVoice(QWEN3_INSTRUCT_REALTIME_VOICES, configuredVoice);
@@ -54,16 +56,25 @@ export function getClientVoiceOptions(model: string, configuredVoice: string): C
 }
 
 export function resolveRequestedVoice(model: string, configuredVoice: string, requestedVoice?: string): string {
-  const requested = requestedVoice?.trim();
-  if (!requested) return configuredVoice;
   const allowed = getClientVoiceOptions(model, configuredVoice);
-  return allowed.some((voice) => voice.id === requested) ? requested : configuredVoice;
+  const safeConfigured = allowed.some((voice) => voice.id === configuredVoice)
+    ? configuredVoice
+    : allowed[0]?.id ?? configuredVoice;
+  const requested = requestedVoice?.trim();
+  if (!requested) return safeConfigured;
+  return allowed.some((voice) => voice.id === requested) ? requested : safeConfigured;
+}
+
+function isQwen35OmniRealtime(normalizedModel: string): boolean {
+  return normalizedModel.includes("qwen3.5")
+    && normalizedModel.includes("omni")
+    && normalizedModel.includes("realtime");
 }
 
 function ensureConfiguredVoice(voices: ClientVoiceOption[], configuredVoice: string): ClientVoiceOption[] {
-  if (voices.some((voice) => voice.id === configuredVoice)) return voices;
+  if (voices.some((voice) => voice.id === configuredVoice)) return voices.map((voice) => ({ ...voice }));
   return [
     { id: configuredVoice, name: configuredVoice, gender: "female", description: "服务器当前配置音色" },
-    ...voices,
+    ...voices.map((voice) => ({ ...voice })),
   ];
 }
