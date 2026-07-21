@@ -35,7 +35,7 @@ export function createGatewayServer(
         response.end(JSON.stringify({
           ok: true,
           service: "aipany-realtime-gateway",
-          version: "0.4.2",
+          version: "0.4.3",
           speakerIdentityStore: config.speakerIdentity.store,
           audioFrontEnd: config.audioFrontEnd.enabled,
           runtimeApiConfig: {
