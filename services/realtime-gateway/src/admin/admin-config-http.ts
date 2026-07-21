@@ -1,5 +1,8 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { ADMIN_CONFIG_PAGE } from "./admin-config-page.js";
+import { decryptConfigBackup, encryptConfigBackup } from "./config-backup.js";
+import { runAdminE2eTest } from "./e2e-test-runner.js";
+import { benchmarkRelayProvider } from "./relay-model-tester.js";
 import { RuntimeApiConfigStore } from "./runtime-api-config-store.js";
 import { llmProtocolSchema, testLlmRoute } from "../providers/llm-provider-pool.js";
 
@@ -10,7 +13,7 @@ export async function handleAdminConfigHttp(
 ): Promise<boolean> {
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
 
-  if (request.method === "GET" && (url.pathname === "/admin/config" || url.pathname === "/admin/config/")) {
+  if (request.method === "GET" && (url.pathname === "/admin/config" || url.pathname.startsWith("/admin/config/"))) {
     response.writeHead(200, {
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "no-store",
@@ -52,7 +55,7 @@ export async function handleAdminConfigHttp(
       response.end(JSON.stringify(result));
     } catch (error) {
       response.writeHead(400);
-      response.end(JSON.stringify({ error: "invalid_config", message: error instanceof Error ? error.message : String(error) }));
+      response.end(JSON.stringify({ error: "invalid_config", message: formatError(error) }));
     }
     return true;
   }
@@ -80,7 +83,93 @@ export async function handleAdminConfigHttp(
       response.end(JSON.stringify({ ok: true, ...result }));
     } catch (error) {
       response.writeHead(400);
-      response.end(JSON.stringify({ error: "llm_test_failed", message: error instanceof Error ? error.message : String(error) }));
+      response.end(JSON.stringify({ error: "llm_test_failed", message: formatError(error) }));
+    }
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/admin/api/config/relay-test") {
+    try {
+      const payload = await readJsonBody(request, 64 * 1024);
+      const providerIds = requireStringArray(payload.providerIds, "providerIds");
+      const pool = store.getLlmProviderPool();
+      const providers = pool.providers.map((provider) => ({ ...provider, models: provider.models.map((model) => ({ ...model, protocols: [...model.protocols] })) }));
+      const results: Array<Record<string, unknown>> = [];
+
+      for (const providerId of providerIds) {
+        const provider = providers.find((item) => item.id === providerId);
+        if (!provider) {
+          results.push({ providerId, ok: false, error: `未找到 LLM Provider：${providerId}` });
+          continue;
+        }
+        try {
+          const benchmark = await benchmarkRelayProvider(provider, {
+            firstTokenTimeoutMs: Math.min(provider.firstTokenTimeoutMs ?? pool.firstTokenTimeoutMs, 15000),
+            totalTimeoutMs: Math.min(provider.totalTimeoutMs ?? pool.totalTimeoutMs, 30000),
+            concurrency: 3,
+          });
+          if (benchmark.eligibleModels.length) {
+            provider.baseUrl = benchmark.testedBaseUrl;
+            provider.models = benchmark.eligibleModels;
+          }
+          results.push({
+            ok: benchmark.eligibleModels.length > 0,
+            ...benchmark,
+            error: benchmark.eligibleModels.length ? undefined : "没有模型同时通过 Responses API 与 Chat Completions",
+          });
+        } catch (error) {
+          results.push({ providerId, providerName: provider.name, ok: false, error: formatError(error) });
+        }
+      }
+
+      const updated = await store.update({ llmProviderPool: { ...pool, providers } });
+      response.writeHead(200);
+      response.end(JSON.stringify({ ok: results.some((item) => item.ok === true), results, config: updated }));
+    } catch (error) {
+      response.writeHead(400);
+      response.end(JSON.stringify({ error: "relay_test_failed", message: formatError(error) }));
+    }
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/admin/api/config/e2e-test") {
+    try {
+      const result = await runAdminE2eTest();
+      response.writeHead(result.ok ? 200 : 502);
+      response.end(JSON.stringify(result));
+    } catch (error) {
+      response.writeHead(502);
+      response.end(JSON.stringify({ error: "e2e_test_failed", message: formatError(error) }));
+    }
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/admin/api/config/export") {
+    try {
+      const payload = await readJsonBody(request, 64 * 1024);
+      const passphrase = requireString(payload.passphrase, "passphrase");
+      const backup = encryptConfigBackup(store.exportDocument(), passphrase);
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      response.writeHead(200);
+      response.end(JSON.stringify({ ok: true, filename: `aipany-config-backup-${stamp}.json`, backup }));
+    } catch (error) {
+      response.writeHead(400);
+      response.end(JSON.stringify({ error: "config_export_failed", message: formatError(error) }));
+    }
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/admin/api/config/import") {
+    try {
+      const payload = await readJsonBody(request, 2 * 1024 * 1024);
+      const passphrase = requireString(payload.passphrase, "passphrase");
+      const document = decryptConfigBackup(payload.backup, passphrase);
+      const result = await store.replaceDocument(document);
+      response.writeHead(200);
+      response.end(JSON.stringify({ ok: true, config: result }));
+    } catch (error) {
+      response.writeHead(400);
+      response.end(JSON.stringify({ error: "config_import_failed", message: formatError(error) }));
     }
     return true;
   }
@@ -115,4 +204,15 @@ async function readJsonBody(request: IncomingMessage, limit: number): Promise<Re
 function requireString(value: unknown, name: string): string {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${name} 不能为空`);
   return value.trim();
+}
+
+function requireStringArray(value: unknown, name: string): string[] {
+  if (!Array.isArray(value)) throw new Error(`${name} 必须是数组`);
+  const output = value.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim());
+  if (!output.length) throw new Error(`请至少选择一个${name === "providerIds" ? "中转站" : name}`);
+  return [...new Set(output)];
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
