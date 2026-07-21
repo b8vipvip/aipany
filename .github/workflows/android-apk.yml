@@ -62,14 +62,14 @@ jobs:
       - name: Prepare artifact
         run: |
           mkdir -p apps/android/dist
-          cp apps/android/app/build/outputs/apk/debug/app-debug.apk apps/android/dist/Aipany-android-v0.1.0-debug.apk
+          cp apps/android/app/build/outputs/apk/debug/app-debug.apk apps/android/dist/Aipany-android-v0.2.0-debug.apk
           cd apps/android/dist
-          sha256sum Aipany-android-v0.1.0-debug.apk > SHA256SUMS.txt
+          sha256sum Aipany-android-v0.2.0-debug.apk > SHA256SUMS.txt
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: aipany-android-v0.1.0-debug
+          name: aipany-android-v0.2.0-debug
           path: apps/android/dist/*
           retention-days: 30
           if-no-files-found: error
