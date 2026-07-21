@@ -1,13 +1,25 @@
-export const ADMIN_FAILOVER_UI = String.raw`(() => {
+function adminFailoverUiClient(): void {
+  type RoutingData = {
+    preferredRoute?: { key: string; remainingMs: number };
+    routes?: Array<Record<string, unknown>>;
+    recentRequests?: Array<Record<string, unknown>>;
+  };
+
   const tokenValue = () => sessionStorage.getItem("aipanyAdminToken") || "";
   const headers = () => ({ Authorization: "Bearer " + tokenValue(), "Content-Type": "application/json" });
-  const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
-  const protocolName = (value) => value === "chat_completions" ? "Chat Completions" : "Responses";
-  const dateText = (value) => value ? new Date(value).toLocaleString() : "-";
-  const ms = (value) => value === undefined || value === null ? "-" : Math.round(value) + " ms";
+  const esc = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  }[char] ?? char));
+  const protocolName = (value: unknown) => value === "chat_completions" ? "Chat Completions" : "Responses";
+  const dateText = (value: unknown) => typeof value === "number" && value > 0 ? new Date(value).toLocaleString() : "-";
+  const ms = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? Math.round(value) + " ms" : "-";
 
-  function ensurePanels() {
-    const llmPage = document.querySelector('[data-page="llm"]');
+  function ensurePanels(): void {
+    const llmPage = document.querySelector<HTMLElement>('[data-page="llm"]');
     if (llmPage && !document.getElementById("llmRoutingObservability")) {
       const card = document.createElement("div");
       card.className = "card";
@@ -21,10 +33,10 @@ export const ADMIN_FAILOVER_UI = String.raw`(() => {
         <div class="table-wrap"><table><thead><tr><th>中转站</th><th>模型</th><th>协议</th><th>状态</th><th>实际超时</th><th>测速</th><th>最近首 Token</th><th>失败</th><th>最近错误</th></tr></thead><tbody id="llmRoutingRows"></tbody></table></div>
       `;
       llmPage.appendChild(card);
-      document.getElementById("refreshLlmRoutingBtn")?.addEventListener("click", () => refreshRouting(true));
+      document.getElementById("refreshLlmRoutingBtn")?.addEventListener("click", () => { void refreshRouting(true); });
     }
 
-    const diagnosticsPage = document.querySelector('[data-page="diagnostics"]');
+    const diagnosticsPage = document.querySelector<HTMLElement>('[data-page="diagnostics"]');
     if (diagnosticsPage && !document.getElementById("llmFailoverTracePanel")) {
       const card = document.createElement("div");
       card.className = "card";
@@ -37,48 +49,53 @@ export const ADMIN_FAILOVER_UI = String.raw`(() => {
         <div id="llmTraceList"><div class="status">暂无路由请求记录</div></div>
       `;
       diagnosticsPage.appendChild(card);
-      document.getElementById("refreshLlmTraceBtn")?.addEventListener("click", () => refreshRouting(true));
+      document.getElementById("refreshLlmTraceBtn")?.addEventListener("click", () => { void refreshRouting(true); });
     }
   }
 
-  function renderMetrics(data) {
+  function renderMetrics(data: RoutingData): void {
     const target = document.getElementById("llmRoutingMetrics");
     if (!target) return;
-    const preferred = data.preferredRoute;
     const routes = Array.isArray(data.routes) ? data.routes : [];
     const cooling = routes.filter((route) => Number(route.cooldownRemainingMs) > 0).length;
-    const last = Array.isArray(data.recentRequests) ? data.recentRequests[0] : undefined;
-    const selected = last?.attempts?.find((attempt) => attempt.routeKey === last.selectedRouteKey);
+    const recent = Array.isArray(data.recentRequests) ? data.recentRequests : [];
+    const last = recent[0];
+    const attempts = last && Array.isArray(last.attempts) ? last.attempts as Array<Record<string, unknown>> : [];
+    const selectedRouteKey = last?.selectedRouteKey;
+    const selected = attempts.find((attempt) => attempt.routeKey === selectedRouteKey);
     target.innerHTML = `
-      <div class="metric"><small>当前首选路由</small><strong>${preferred ? esc(preferred.key) : "按测速优先级"}</strong><div class="hint">${preferred ? "TTL 剩余 " + ms(preferred.remainingMs) : "没有粘连路由"}</div></div>
+      <div class="metric"><small>当前首选路由</small><strong>${data.preferredRoute ? esc(data.preferredRoute.key) : "按测速优先级"}</strong><div class="hint">${data.preferredRoute ? "TTL 剩余 " + ms(data.preferredRoute.remainingMs) : "没有粘连路由"}</div></div>
       <div class="metric"><small>可用路由组合</small><strong>${routes.length}</strong><div class="hint">冷却中 ${cooling} 条</div></div>
       <div class="metric"><small>最近命中</small><strong>${selected ? esc(selected.model) : "-"}</strong><div class="hint">${selected ? esc(selected.providerName) + " / " + protocolName(selected.protocol) : "暂无请求"}</div></div>
       <div class="metric"><small>最近 LLM 首 Token</small><strong>${selected ? ms(selected.firstTokenMs) : "-"}</strong><div class="hint">${last ? "总路由耗时 " + ms(last.totalMs) : "暂无请求"}</div></div>
     `;
   }
 
-  function renderRoutes(data) {
+  function renderRoutes(data: RoutingData): void {
     const target = document.getElementById("llmRoutingRows");
     if (!target) return;
     const routes = Array.isArray(data.routes) ? data.routes : [];
     target.innerHTML = routes.map((route) => {
       const cooling = Number(route.cooldownRemainingMs) > 0;
-      const status = route.preferred ? "★ 首选" : cooling ? "冷却中" : "可用";
+      const preferred = route.preferred === true;
+      const status = preferred ? "★ 首选" : cooling ? "冷却中" : "可用";
+      const actualTimeout = Number(route.firstTokenTimeoutMs);
+      const configuredTimeout = Number(route.configuredFirstTokenTimeoutMs);
       return `<tr>
         <td>${esc(route.providerName)}</td>
         <td>${esc(route.model)}</td>
         <td>${esc(protocolName(route.protocol))}</td>
-        <td><span class="badge ${cooling ? "bad" : route.preferred ? "good" : ""}">${status}</span></td>
-        <td>${ms(route.firstTokenTimeoutMs)}${route.firstTokenTimeoutMs !== route.configuredFirstTokenTimeoutMs ? `<div class="hint">全局/站点 ${ms(route.configuredFirstTokenTimeoutMs)}</div>` : ""}</td>
+        <td><span class="badge ${cooling ? "bad" : preferred ? "good" : ""}">${status}</span></td>
+        <td>${ms(actualTimeout)}${actualTimeout !== configuredTimeout ? `<div class="hint">配置值 ${ms(configuredTimeout)}</div>` : ""}</td>
         <td>${ms(route.benchmarkFirstTokenMs)}</td>
         <td>${ms(route.lastFirstTokenMs)}</td>
-        <td>${route.failures || 0}</td>
+        <td>${Number(route.failures) || 0}</td>
         <td title="${esc(route.lastError || "")}">${esc(route.lastError ? String(route.lastError).slice(0, 70) : "-")}</td>
       </tr>`;
     }).join("") || `<tr><td colspan="9">暂无可用路由</td></tr>`;
   }
 
-  function renderTraces(data) {
+  function renderTraces(data: RoutingData): void {
     const target = document.getElementById("llmTraceList");
     if (!target) return;
     const traces = Array.isArray(data.recentRequests) ? data.recentRequests.slice(0, 12) : [];
@@ -87,7 +104,7 @@ export const ADMIN_FAILOVER_UI = String.raw`(() => {
       return;
     }
     target.innerHTML = traces.map((trace) => {
-      const attempts = Array.isArray(trace.attempts) ? trace.attempts : [];
+      const attempts = Array.isArray(trace.attempts) ? trace.attempts as Array<Record<string, unknown>> : [];
       const chain = attempts.map((attempt, index) => {
         const ok = attempt.status === "success";
         const cancelled = attempt.status === "cancelled";
@@ -110,42 +127,48 @@ export const ADMIN_FAILOVER_UI = String.raw`(() => {
     }).join("");
   }
 
-  async function refreshRouting(showStatus) {
+  async function refreshRouting(showStatus: boolean): Promise<void> {
     if (!tokenValue()) return;
     try {
       const response = await fetch("/admin/api/config/llm-routing", { headers: headers() });
-      const data = await response.json();
+      const data = await response.json() as RoutingData & { message?: string };
       if (!response.ok) throw new Error(data.message || JSON.stringify(data));
       renderMetrics(data);
       renderRoutes(data);
       renderTraces(data);
-      if (showStatus && typeof setStatus === "function") setStatus("LLM Failover 路由状态已刷新。", true);
+      const statusFn = (globalThis as unknown as { setStatus?: (text: string, ok?: boolean) => void }).setStatus;
+      if (showStatus && typeof statusFn === "function") statusFn("LLM Failover 路由状态已刷新。", true);
     } catch (error) {
-      if (showStatus && typeof setStatus === "function") setStatus("读取 LLM Failover 状态失败：" + error.message, false);
+      const statusFn = (globalThis as unknown as { setStatus?: (text: string, ok?: boolean) => void }).setStatus;
+      const message = error instanceof Error ? error.message : String(error);
+      if (showStatus && typeof statusFn === "function") statusFn("读取 LLM Failover 状态失败：" + message, false);
     }
   }
 
   ensurePanels();
-  const e2eButton = document.getElementById("runE2eBtn");
+  const e2eButton = document.getElementById("runE2eBtn") as HTMLButtonElement | null;
   if (e2eButton && e2eButton.onclick) {
     const original = e2eButton.onclick;
     e2eButton.onclick = async function(event) {
       const result = original.call(this, event);
-      if (result && typeof result.then === "function") await result;
+      if (result && typeof (result as Promise<unknown>).then === "function") await result;
       await refreshRouting(false);
     };
   }
 
   document.querySelectorAll('[data-route="llm"],[data-route="diagnostics"]').forEach((link) => {
-    link.addEventListener("click", () => setTimeout(() => refreshRouting(false), 50));
+    link.addEventListener("click", () => setTimeout(() => { void refreshRouting(false); }, 50));
   });
   document.getElementById("mobileNav")?.addEventListener("change", (event) => {
-    if (event.target.value === "llm" || event.target.value === "diagnostics") setTimeout(() => refreshRouting(false), 50);
+    const value = (event.target as HTMLSelectElement).value;
+    if (value === "llm" || value === "diagnostics") setTimeout(() => { void refreshRouting(false); }, 50);
   });
 
-  refreshRouting(false);
+  void refreshRouting(false);
   setInterval(() => {
-    const active = document.querySelector('.page.active')?.dataset.page;
-    if (active === "llm" || active === "diagnostics") refreshRouting(false);
+    const active = document.querySelector<HTMLElement>(".page.active")?.dataset.page;
+    if (active === "llm" || active === "diagnostics") void refreshRouting(false);
   }, 5000);
-})();`;
+}
+
+export const ADMIN_FAILOVER_UI = `(${adminFailoverUiClient.toString()})();`;
