@@ -7,7 +7,9 @@ import kotlin.math.sqrt
 /**
  * Lightweight client-side endpoint detector for 16 kHz / mono / PCM16 audio.
  * The active profile changes only the silence window; speech detection continues
- * to adapt to the local noise floor and uses a stricter threshold during playback.
+ * to adapt to the local noise floor. During assistant playback it uses a modest
+ * extra threshold plus one extra confirmation frame: Android AEC handles most
+ * speaker leakage, while real user interruptions should still be detected fast.
  */
 class EndpointDetector(
     private val onSpeechStarted: () -> Unit,
@@ -41,9 +43,13 @@ class EndpointDetector(
         if (!speaking) {
             if (cooldownFrames > 0) cooldownFrames--
 
-            val startMargin = if (assistantSpeaking) 20f else 10f
-            val startThreshold = max(-42f, noiseFloorDbfs + startMargin)
-            val likelySpeech = dbfs > startThreshold && dbfs > -55f
+            // VOICE_COMMUNICATION + platform AEC removes most speaker leakage.
+            // Keep a higher threshold while playback is active, but not so high
+            // that normal conversational-volume interruptions are ignored.
+            val startMargin = if (assistantSpeaking) 12f else 9f
+            val absoluteFloor = if (assistantSpeaking) -42f else -55f
+            val startThreshold = max(absoluteFloor, noiseFloorDbfs + startMargin)
+            val likelySpeech = dbfs > startThreshold
 
             if (!likelySpeech && dbfs < -24f) {
                 val bounded = dbfs.coerceIn(-80f, -24f)
@@ -56,7 +62,8 @@ class EndpointDetector(
                 else -> (consecutiveSpeechFrames - 1).coerceAtLeast(0)
             }
 
-            if (consecutiveSpeechFrames >= 3) {
+            val requiredStartFrames = if (assistantSpeaking) 4 else 3
+            if (consecutiveSpeechFrames >= requiredStartFrames) {
                 speaking = true
                 speechFrames = consecutiveSpeechFrames
                 silenceFrames = 0
