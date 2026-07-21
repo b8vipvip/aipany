@@ -42,6 +42,7 @@ jobs:
           gradle-version: "8.9"
 
       - name: Run Android unit tests
+        id: android_tests
         shell: bash
         run: |
           set +e
@@ -51,6 +52,7 @@ jobs:
           exit $status
 
       - name: Build debug APK
+        id: android_build
         shell: bash
         run: |
           set +e
@@ -59,7 +61,19 @@ jobs:
           tail -n 180 /tmp/aipany-android-build.log
           exit $status
 
+      - name: Upload Android failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aipany-android-v0.2.0-failure-logs
+          path: |
+            /tmp/aipany-android-test.log
+            /tmp/aipany-android-build.log
+          retention-days: 7
+          if-no-files-found: warn
+
       - name: Prepare artifact
+        if: success()
         run: |
           mkdir -p apps/android/dist
           cp apps/android/app/build/outputs/apk/debug/app-debug.apk apps/android/dist/Aipany-android-v0.2.0-debug.apk
@@ -67,6 +81,7 @@ jobs:
           sha256sum Aipany-android-v0.2.0-debug.apk > SHA256SUMS.txt
 
       - name: Upload APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: aipany-android-v0.2.0-debug
