@@ -14,7 +14,16 @@ jobs:
           node-version: 22
       - run: python3 -m compileall -q services/speaker-intelligence/app
       - run: npm install
-      - run: npm run typecheck
+
+      - name: TypeScript typecheck
+        shell: bash
+        run: |
+          set +e
+          npm run typecheck > /tmp/aipany-typecheck.log 2>&1
+          status=$?
+          tail -n 220 /tmp/aipany-typecheck.log
+          exit $status
+
       - name: Test keyring encryption
         run: node --import tsx --test packages/audio-intelligence/test/keyring-encrypted-embedding-codec.test.ts
       - name: Test gateway auth
@@ -23,5 +32,33 @@ jobs:
         run: node --import tsx --test services/realtime-gateway/test/streaming-audio-front-end.test.ts
       - name: Test social turn evaluator
         run: node --import tsx --test services/realtime-gateway/test/social-turn-evaluator.test.ts
-      - run: npm test
-      - run: npm run build
+
+      - name: Full test suite
+        shell: bash
+        run: |
+          set +e
+          npm test > /tmp/aipany-test.log 2>&1
+          status=$?
+          tail -n 260 /tmp/aipany-test.log
+          exit $status
+
+      - name: Production build
+        shell: bash
+        run: |
+          set +e
+          npm run build > /tmp/aipany-build.log 2>&1
+          status=$?
+          tail -n 220 /tmp/aipany-build.log
+          exit $status
+
+      - name: Upload CI failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aipany-ci-failure-logs
+          path: |
+            /tmp/aipany-typecheck.log
+            /tmp/aipany-test.log
+            /tmp/aipany-build.log
+          if-no-files-found: ignore
+          retention-days: 14
