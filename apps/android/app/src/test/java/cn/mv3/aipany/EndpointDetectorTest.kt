@@ -45,7 +45,7 @@ class EndpointDetectorTest {
     }
 
     @Test
-    fun assistantPlaybackRaisesSpeechStartThreshold() {
+    fun assistantPlaybackRejectsModerateEchoButAcceptsSustainedUserInterruption() {
         var starts = 0
         val detector = EndpointDetector(
             onSpeechStarted = { starts++ },
@@ -58,6 +58,8 @@ class EndpointDetectorTest {
         assertEquals(0, starts)
 
         repeat(3) { detector.process(frame(8_000), 320, true) }
+        assertEquals(0, starts)
+        detector.process(frame(8_000), 320, true)
         assertTrue(starts >= 1)
     }
 
