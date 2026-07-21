@@ -1,10 +1,16 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { ADMIN_CONFIG_PAGE } from "./admin-config-page.js";
+import { ADMIN_FAILOVER_UI } from "./admin-failover-ui.js";
 import { decryptConfigBackup, encryptConfigBackup } from "./config-backup.js";
 import { runAdminE2eTest } from "./e2e-test-runner.js";
 import { benchmarkRelayProvider } from "./relay-model-tester.js";
 import { RuntimeApiConfigStore } from "./runtime-api-config-store.js";
-import { llmProtocolSchema, testLlmRoute } from "../providers/llm-provider-pool.js";
+import {
+  getLlmRoutingSnapshot,
+  llmProtocolSchema,
+  resetLlmRoutingState,
+  testLlmRoute,
+} from "../providers/llm-provider-pool.js";
 
 export async function handleAdminConfigHttp(
   request: IncomingMessage,
@@ -13,14 +19,24 @@ export async function handleAdminConfigHttp(
 ): Promise<boolean> {
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
 
+  if (request.method === "GET" && url.pathname === "/admin/failover-ui.js") {
+    response.writeHead(200, {
+      "Content-Type": "application/javascript; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+    });
+    response.end(ADMIN_FAILOVER_UI);
+    return true;
+  }
+
   if (request.method === "GET" && (url.pathname === "/admin/config" || url.pathname.startsWith("/admin/config/"))) {
     response.writeHead(200, {
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "no-store",
       "X-Frame-Options": "DENY",
-      "Content-Security-Policy": "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'",
+      "Content-Security-Policy": "default-src 'self'; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'",
     });
-    response.end(ADMIN_CONFIG_PAGE);
+    response.end(ADMIN_CONFIG_PAGE.replace("</body>", '<script src="/admin/failover-ui.js"></script></body>'));
     return true;
   }
 
@@ -47,10 +63,17 @@ export async function handleAdminConfigHttp(
     return true;
   }
 
+  if (request.method === "GET" && url.pathname === "/admin/api/config/llm-routing") {
+    response.writeHead(200);
+    response.end(JSON.stringify(getLlmRoutingSnapshot(store.getLlmProviderPool(), 20)));
+    return true;
+  }
+
   if (request.method === "PUT" && url.pathname === "/admin/api/config") {
     try {
       const payload = await readJsonBody(request, 512 * 1024);
       const result = await store.update(payload);
+      if (payload.llmProviderPool !== undefined) resetLlmRoutingState();
       response.writeHead(200);
       response.end(JSON.stringify(result));
     } catch (error) {
@@ -123,6 +146,7 @@ export async function handleAdminConfigHttp(
       }
 
       const updated = await store.update({ llmProviderPool: { ...pool, providers } });
+      resetLlmRoutingState();
       response.writeHead(200);
       response.end(JSON.stringify({ ok: results.some((item) => item.ok === true), results, config: updated }));
     } catch (error) {
@@ -165,6 +189,7 @@ export async function handleAdminConfigHttp(
       const passphrase = requireString(payload.passphrase, "passphrase");
       const document = decryptConfigBackup(payload.backup, passphrase);
       const result = await store.replaceDocument(document);
+      resetLlmRoutingState();
       response.writeHead(200);
       response.end(JSON.stringify({ ok: true, config: result }));
     } catch (error) {
