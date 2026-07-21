@@ -2,6 +2,161 @@
 
 > 本文档记录重要业务逻辑、框架、协议和架构决策。后续涉及架构、协议或核心运行逻辑的修改必须同步更新本文件。
 
+## 2026-07-21 · v0.4.3 Admin Console v2 & Provider Diagnostics
+
+### 目标
+
+将 `/admin/config` 从单页长表单升级为分页面运维控制台，并将生产部署后的三类高频操作内置到 Gateway：
+
+1. 完整 ASR → LLM → TTS E2E 自检；
+2. LLM 中转站自动模型发现、双协议兼容测试与首 Token 测速；
+3. 运行时 API 配置和密钥的加密导出 / 恢复。
+
+客户端 Realtime Protocol 不发生变化，所有能力仍属于服务端管理面。
+
+### 路由化管理控制台
+
+管理界面拆分为独立路径：
+
+```text
+/admin/config
+/admin/config/dashscope
+/admin/config/omni
+/admin/config/llm
+/admin/config/remote
+/admin/config/diagnostics
+/admin/config/backup
+```
+
+服务端仍使用同一管理 Token 鉴权模型。浏览器端使用 History API 在页面间切换，Gateway 对 `/admin/config/*` 统一返回管理控制台 Shell，因此不需要额外 Web Server 路由规则。
+
+### LLM 中转站自动测试
+
+新增 `Relay Model Tester`，将原独立中转站测试工具的核心检测逻辑内置到 Gateway，并针对实时语音增加流式首 Token 延迟指标。
+
+测试流程：
+
+```text
+Provider
+↓
+/models 自动发现
+↓
+Responses API stream test
+↓
+Chat Completions stream test
+↓
+两种 Aipany 请求方式全部通过
+↓
+计算首 Token 延迟评分
+↓
+自动生成 Model priority / protocol order
+```
+
+自动配置规则：
+
+- 只有 `Responses API` 与 `Chat Completions` 都成功并实际返回文本 Token 的模型，才会自动进入 Provider 模型池；
+- Legacy Completions 不属于 Aipany 运行时请求方式，因此不作为自动入池条件；
+- 模型评分为两种协议首 Token 延迟的平均值；
+- 模型按评分从快到慢生成 `priority = 10, 20, 30...`；
+- 每个模型的 `protocols` 按各协议实测首 Token 延迟自动排序；
+- Provider / 中转站优先级仍由管理员手动配置；
+- 管理界面不再为每个模型创建独立配置卡，每个 Provider 只保留一个统一模型输入框和一张测试结果表。
+
+新增接口：
+
+```text
+POST /admin/api/config/relay-test
+```
+
+请求可以包含多个 `providerIds`，用于批量测试勾选的中转站。测试完成后，符合条件的模型列表和协议顺序会写回运行时 Provider Pool。
+
+### 管理面 E2E 自检
+
+新增：
+
+```text
+POST /admin/api/config/e2e-test
+```
+
+完整链路：
+
+```text
+Qwen TTS 生成测试语音
+↓
+24 kHz PCM → 16 kHz PCM
+↓
+内部 WebSocket Realtime Session
+↓
+Qwen Realtime ASR
+↓
+LLM Provider Pool
+↓
+Qwen Realtime TTS
+↓
+Binary PCM 返回
+```
+
+管理页会展示：
+
+- 输入 TTS 生成字节数和耗时；
+- ASR Final 文本；
+- LLM 最终文本；
+- LLM 首 Token 延迟；
+- 返回 TTS PCM 字节数；
+- 完整测试总耗时。
+
+自检使用独立 `deployment-test` 会话，不修改用户声纹、会话历史或设备协议。当前内部自检依赖 `AIPANY_GATEWAY_TOKEN` 作为 Legacy Realtime Token。
+
+### 加密配置导出与恢复
+
+新增：
+
+```text
+POST /admin/api/config/export
+POST /admin/api/config/import
+```
+
+普通 `GET /admin/api/config` 仍然只返回密钥是否已配置，不返回明文。
+
+需要完整导出运行时 API 配置时，管理员提供备份密码，服务端使用：
+
+```text
+KDF: scrypt
+Cipher: AES-256-GCM
+```
+
+对完整运行时配置文档加密后返回浏览器下载。
+
+备份包含：
+
+- DashScope / Qwen Omni 运行时 API 配置；
+- LLM Provider Pool 和 Provider API Key；
+- Remote GPU 运行时配置和 Token。
+
+备份不包含启动级秘密：
+
+- `AIPANY_ADMIN_TOKEN`；
+- JWT Secret；
+- 数据库密码；
+- Speaker Identity Encryption Key。
+
+导入时使用相同密码解密并验证 GCM Authentication Tag，再原子写回运行时配置文件。
+
+`RuntimeApiConfigStore` 同时增加启动环境 baseline：每次应用完整运行时文档前先恢复 `.env` 基线，再叠加运行时值，从而保证导入或删除配置项时不会残留旧的 `process.env` 值。
+
+### 测试
+
+新增回归覆盖：
+
+- 自动模型发现；
+- 只保留同时通过 Responses 与 Chat Completions 的模型；
+- 根据首 Token 延迟自动生成模型排序和协议顺序；
+- 加密备份中不出现 API Key 明文；
+- 正确密码可以完整恢复运行时配置；
+- 错误密码无法解密备份。
+
+---
+
 ## 2026-07-21 · v0.4.2 LLM Provider Pool & Failover
 
 ### 背景
