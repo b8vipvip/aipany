@@ -38,7 +38,7 @@ const envSchema = z.object({
   QWEN_OMNI_REALTIME_ENABLED: booleanString.default("false"),
   QWEN_OMNI_REALTIME_BASE_URL: optionalUrl,
   QWEN_OMNI_REALTIME_MODEL: z.string().default("qwen3.5-omni-plus-realtime"),
-  QWEN_OMNI_REALTIME_VOICE: z.string().default("Cherry"),
+  QWEN_OMNI_REALTIME_VOICE: z.string().default("Tina"),
   QWEN_OMNI_REALTIME_TURN_DETECTION: z.enum(["server_vad", "semantic_vad"]).default("server_vad"),
   QWEN_OMNI_REALTIME_VAD_THRESHOLD: z.coerce.number().min(-1).max(1).default(0.2),
   QWEN_OMNI_REALTIME_SILENCE_MS: z.coerce.number().int().min(200).max(6000).default(350),
