@@ -52,12 +52,16 @@ const BOOLEAN_KEYS = new Set<ManagedRuntimeKey>([
 export class RuntimeApiConfigStore {
   readonly filePath: string;
   private readonly adminToken?: string;
+  private readonly baselineEnv: Partial<Record<ManagedRuntimeKey, string>>;
   private values: RuntimeApiConfig = {};
   private llmProviderPool?: LlmProviderPoolConfig;
 
   constructor(options: { filePath?: string; adminToken?: string } = {}) {
     this.filePath = options.filePath?.trim() || "/data/runtime-api-config.json";
     this.adminToken = options.adminToken?.trim() || undefined;
+    this.baselineEnv = Object.fromEntries(
+      MANAGED_RUNTIME_KEYS.flatMap((key) => process.env[key] === undefined ? [] : [[key, process.env[key]!]]),
+    ) as Partial<Record<ManagedRuntimeKey, string>>;
   }
 
   get enabled(): boolean {
@@ -76,7 +80,7 @@ export class RuntimeApiConfigStore {
       const content = await readFile(this.filePath, "utf8");
       const parsed = JSON.parse(content) as Record<string, unknown>;
       this.values = sanitize(parsed);
-      if (parsed.llmProviderPool !== undefined) this.llmProviderPool = parseLlmProviderPool(parsed.llmProviderPool);
+      this.llmProviderPool = parsed.llmProviderPool === undefined ? undefined : parseLlmProviderPool(parsed.llmProviderPool);
       this.apply();
     } catch (error) {
       if (error && typeof error === "object" && "code" in error && (error as { code?: string }).code === "ENOENT") return;
@@ -114,6 +118,23 @@ export class RuntimeApiConfigStore {
     return this.snapshot();
   }
 
+  async replaceDocument(document: Record<string, unknown>) {
+    this.values = sanitize(document);
+    this.llmProviderPool = document.llmProviderPool === undefined
+      ? undefined
+      : parseLlmProviderPool(document.llmProviderPool);
+    this.apply();
+    await this.persist();
+    return this.snapshot();
+  }
+
+  exportDocument(): Record<string, unknown> {
+    return {
+      ...this.values,
+      llmProviderPool: this.getLlmProviderPool(),
+    };
+  }
+
   getLlmProviderPool(): LlmProviderPoolConfig {
     return this.llmProviderPool ?? createLegacyLlmProviderPool({
       baseUrl: process.env.LLM_BASE_URL?.trim() || "",
@@ -140,6 +161,11 @@ export class RuntimeApiConfigStore {
   }
 
   private apply(): void {
+    for (const key of MANAGED_RUNTIME_KEYS) {
+      const baseline = this.baselineEnv[key];
+      if (baseline === undefined) delete process.env[key];
+      else process.env[key] = baseline;
+    }
     for (const [key, value] of Object.entries(this.values)) process.env[key] = value;
     if (this.llmProviderPool) process.env.LLM_PROVIDER_POOL_JSON = JSON.stringify(this.llmProviderPool);
     else delete process.env.LLM_PROVIDER_POOL_JSON;
