@@ -7,7 +7,8 @@ import kotlin.math.sqrt
 /**
  * Lightweight client-side endpoint detector for 16 kHz / mono / PCM16 audio.
  * The active profile changes only the silence window; speech detection continues
- * to adapt to the local noise floor and uses a stricter threshold during playback.
+ * to adapt to the local noise floor. During assistant playback it uses a stricter
+ * echo-resistant start threshold, while platform AEC removes most speaker leakage.
  */
 class EndpointDetector(
     private val onSpeechStarted: () -> Unit,
@@ -15,7 +16,7 @@ class EndpointDetector(
     private val onLevel: (dbfs: Float, noiseFloorDbfs: Float, speaking: Boolean) -> Unit,
 ) {
     @Volatile private var profile: EndpointProfile = EndpointProfile.BALANCED
-    private var noiseFloorDbfs = -60f
+    private var noiseFloorDbfs = -52f
     private var speaking = false
     private var consecutiveSpeechFrames = 0
     private var silenceFrames = 0
@@ -41,9 +42,10 @@ class EndpointDetector(
         if (!speaking) {
             if (cooldownFrames > 0) cooldownFrames--
 
-            val startMargin = if (assistantSpeaking) 20f else 10f
-            val startThreshold = max(-42f, noiseFloorDbfs + startMargin)
-            val likelySpeech = dbfs > startThreshold && dbfs > -55f
+            val startMargin = if (assistantSpeaking) 10f else 7f
+            val absoluteFloor = if (assistantSpeaking) -34f else -50f
+            val startThreshold = max(absoluteFloor, noiseFloorDbfs + startMargin)
+            val likelySpeech = dbfs > startThreshold
 
             if (!likelySpeech && dbfs < -24f) {
                 val bounded = dbfs.coerceIn(-80f, -24f)
@@ -56,7 +58,8 @@ class EndpointDetector(
                 else -> (consecutiveSpeechFrames - 1).coerceAtLeast(0)
             }
 
-            if (consecutiveSpeechFrames >= 3) {
+            val requiredStartFrames = if (assistantSpeaking) 4 else 3
+            if (consecutiveSpeechFrames >= requiredStartFrames) {
                 speaking = true
                 speechFrames = consecutiveSpeechFrames
                 silenceFrames = 0
