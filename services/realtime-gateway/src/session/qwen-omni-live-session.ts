@@ -9,6 +9,7 @@ import {
 } from "@aipany/protocol";
 import { assertSessionIdentity, requireScope, type AuthContext } from "../auth.js";
 import type { AppConfig } from "../config.js";
+import { resolveRequestedVoice } from "../mobile/client-capabilities.js";
 import type { SessionObservability } from "../observability/realtime-observability.js";
 import { QwenOmniRealtimeClient } from "../providers/qwen-omni-realtime.js";
 
@@ -56,7 +57,11 @@ export class QwenOmniLiveSession {
     this.aliases = event.session.assistantAliases;
     this.socialProactivity = event.session.socialProactivity;
     this.systemPrompt = event.session.systemPrompt?.trim() || this.config.conversation.defaultSystemPrompt;
-    const voice = event.session.outputVoice?.trim() || this.config.qwenOmniRealtime.voice;
+    const voice = resolveRequestedVoice(
+      this.config.qwenOmniRealtime.model,
+      this.config.qwenOmniRealtime.voice,
+      event.session.outputVoice,
+    );
 
     const provider = new QwenOmniRealtimeClient({
       apiKey: this.config.qwenOmniRealtime.apiKey,
@@ -136,6 +141,14 @@ export class QwenOmniLiveSession {
       this.telemetry?.event("omni.closed", { code, reason }, code === 1000 ? "info" : "warn", "omni");
       if (this.providerReady) {
         this.sendError("OMNI_REALTIME_CLOSED", `Qwen Omni Realtime 连接关闭：${code} ${reason}`.trim(), true);
+        // Do not leave the mobile client attached to a dead upstream session.
+        // A 1011 close enters the Android exponential reconnect loop; the next
+        // connection can recover Native Live or fall back to Cascaded in Auto.
+        queueMicrotask(() => {
+          if (this.client.readyState === WebSocket.OPEN || this.client.readyState === WebSocket.CONNECTING) {
+            this.client.close(1011, "omni upstream closed");
+          }
+        });
       }
     });
 
@@ -149,7 +162,7 @@ export class QwenOmniLiveSession {
     });
     this.sendModeState();
     this.send({ type: "speaker.consent.updated", granted: false });
-    this.telemetry?.event("session.ready", { upstream: "qwen-omni-realtime" }, "info", "session");
+    this.telemetry?.event("session.ready", { upstream: "qwen-omni-realtime", voice }, "info", "session");
     this.send({ type: "session.ready", sessionId: this.id });
   }
 
