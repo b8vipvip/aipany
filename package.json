@@ -9,7 +9,7 @@
   ],
   "scripts": {
     "build": "npm --workspace @aipany/protocol run build && npm --workspace @aipany/audio-intelligence run build && npm --workspace @aipany/realtime-gateway run build",
-    "dev": "npm --workspace @aipany/protocol run build && npm --workspace @aipany/audio-intelligence run dev",
+    "dev": "npm --workspace @aipany/protocol run build && npm --workspace @aipany/audio-intelligence run typecheck && npm --workspace @aipany/audio-intelligence run build && npm --workspace @aipany/realtime-gateway run dev",
     "start": "npm --workspace @aipany/realtime-gateway run start",
     "test": "npm --workspace @aipany/protocol run build && npm --workspace @aipany/audio-intelligence run test && npm --workspace @aipany/audio-intelligence run build && npm --workspace @aipany/realtime-gateway run test",
     "typecheck": "npm --workspace @aipany/protocol run build && npm --workspace @aipany/audio-intelligence run typecheck && npm --workspace @aipany/audio-intelligence run build && npm --workspace @aipany/realtime-gateway run typecheck"
