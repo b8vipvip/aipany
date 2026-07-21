@@ -157,12 +157,13 @@ function adminObservabilityUiClient(): void {
       logs: "/admin/config/logs",
     };
     const titleMap: Record<string, string> = { quality: "实时质量", sessions: "实时会话", logs: "结构化日志" };
-    if (!pathMap[route]) return;
-    if (push && location.pathname !== pathMap[route]) history.pushState({}, "", pathMap[route]);
+    const path = pathMap[route];
+    if (!path) return;
+    if (push && location.pathname !== path) history.pushState({}, "", path);
     document.querySelectorAll<HTMLElement>(".page").forEach((page) => page.classList.toggle("active", page.dataset.page === route));
     document.querySelectorAll<HTMLElement>("#nav a").forEach((link) => link.classList.toggle("active", link.dataset.route === route));
     const title = document.getElementById("pageTitle");
-    if (title) title.textContent = titleMap[route];
+    if (title) title.textContent = titleMap[route] ?? route;
     const mobileNav = document.getElementById("mobileNav") as HTMLSelectElement | null;
     if (mobileNav) mobileNav.value = route;
     document.querySelectorAll<HTMLElement>(".save-action").forEach((element) => element.classList.add("hidden"));
