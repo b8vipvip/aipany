@@ -7,9 +7,8 @@ import kotlin.math.sqrt
 /**
  * Lightweight client-side endpoint detector for 16 kHz / mono / PCM16 audio.
  * The active profile changes only the silence window; speech detection continues
- * to adapt to the local noise floor. During assistant playback it uses a modest
- * extra threshold plus one extra confirmation frame: Android AEC handles most
- * speaker leakage, while real user interruptions should still be detected fast.
+ * to adapt to the local noise floor. During assistant playback it uses a stricter
+ * echo-resistant start threshold, while platform AEC removes most speaker leakage.
  */
 class EndpointDetector(
     private val onSpeechStarted: () -> Unit,
@@ -17,7 +16,7 @@ class EndpointDetector(
     private val onLevel: (dbfs: Float, noiseFloorDbfs: Float, speaking: Boolean) -> Unit,
 ) {
     @Volatile private var profile: EndpointProfile = EndpointProfile.BALANCED
-    private var noiseFloorDbfs = -60f
+    private var noiseFloorDbfs = -52f
     private var speaking = false
     private var consecutiveSpeechFrames = 0
     private var silenceFrames = 0
@@ -43,11 +42,8 @@ class EndpointDetector(
         if (!speaking) {
             if (cooldownFrames > 0) cooldownFrames--
 
-            // VOICE_COMMUNICATION + platform AEC removes most speaker leakage.
-            // Keep a higher threshold while playback is active, but not so high
-            // that normal conversational-volume interruptions are ignored.
-            val startMargin = if (assistantSpeaking) 12f else 9f
-            val absoluteFloor = if (assistantSpeaking) -42f else -55f
+            val startMargin = if (assistantSpeaking) 10f else 7f
+            val absoluteFloor = if (assistantSpeaking) -34f else -50f
             val startThreshold = max(absoluteFloor, noiseFloorDbfs + startMargin)
             val likelySpeech = dbfs > startThreshold
 
