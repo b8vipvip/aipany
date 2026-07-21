@@ -30,6 +30,7 @@ export class OpenAiCompatibleLlm {
     messages: ChatMessage[];
     signal: AbortSignal;
     onDelta: (delta: string) => Promise<void> | void;
+    traceId?: string;
   }): Promise<void> {
     await this.pool.streamChat(options);
   }
