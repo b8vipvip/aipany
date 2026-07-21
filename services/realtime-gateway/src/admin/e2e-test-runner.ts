@@ -1,5 +1,12 @@
 import WebSocket from "ws";
 import { loadConfig } from "../config.js";
+import {
+  createLegacyLlmProviderPool,
+  getLlmRoutingSnapshot,
+  parseLlmProviderPool,
+  type LlmProviderPoolConfig,
+  type LlmRequestTrace,
+} from "../providers/llm-provider-pool.js";
 import { QwenTtsRealtimeClient } from "../providers/qwen-tts.js";
 
 export interface AdminE2eTestResult {
@@ -8,6 +15,7 @@ export interface AdminE2eTestResult {
   transcript: string;
   answerText: string;
   responseAudioBytes: number;
+  llmRouteTrace?: LlmRequestTrace;
   timings: {
     inputTtsMs: number;
     sessionReadyMs: number;
@@ -24,6 +32,7 @@ interface RealtimeRoundTripResult {
   sessionReadyMs: number;
   asrFinalMs?: number;
   llmFirstTokenMs?: number;
+  responseCreatedAt?: number;
 }
 
 export async function runAdminE2eTest(): Promise<AdminE2eTestResult> {
@@ -48,12 +57,19 @@ export async function runAdminE2eTest(): Promise<AdminE2eTestResult> {
     startedAt,
   });
 
+  const routing = getLlmRoutingSnapshot(readCurrentProviderPool(config), 50);
+  const traceBoundary = result.responseCreatedAt ?? startedAt;
+  const llmRouteTrace = routing.recentRequests
+    .filter((trace) => trace.startedAt >= traceBoundary - 500)
+    .sort((a, b) => Math.abs(a.startedAt - traceBoundary) - Math.abs(b.startedAt - traceBoundary))[0];
+
   return {
     ok: Boolean(result.transcript && result.answerText && result.responseAudioBytes > 0),
     inputTtsBytes: inputAudio24k.length,
     transcript: result.transcript,
     answerText: result.answerText,
     responseAudioBytes: result.responseAudioBytes,
+    llmRouteTrace,
     timings: {
       inputTtsMs,
       sessionReadyMs: result.sessionReadyMs,
@@ -103,6 +119,7 @@ async function runRealtimeRoundTrip(input: {
     let asrFinalMs: number | undefined;
     let llmStartedAt = 0;
     let llmFirstTokenMs: number | undefined;
+    let responseCreatedAt: number | undefined;
     let settled = false;
 
     const finish = (error?: Error) => {
@@ -110,7 +127,7 @@ async function runRealtimeRoundTrip(input: {
       settled = true;
       try { ws.close(); } catch { /* ignore */ }
       if (error) reject(error);
-      else resolve({ transcript, answerText, responseAudioBytes, sessionReadyMs, asrFinalMs, llmFirstTokenMs });
+      else resolve({ transcript, answerText, responseAudioBytes, sessionReadyMs, asrFinalMs, llmFirstTokenMs, responseCreatedAt });
     };
 
     ws.on("open", () => {
@@ -156,6 +173,10 @@ async function runRealtimeRoundTrip(input: {
         llmStartedAt = Date.now();
         return;
       }
+      if (type === "response.created") {
+        responseCreatedAt = Date.now();
+        return;
+      }
       if (type === "response.text.delta") {
         const delta = typeof event.delta === "string" ? event.delta : "";
         if (delta && llmFirstTokenMs === undefined && llmStartedAt) llmFirstTokenMs = Date.now() - llmStartedAt;
@@ -181,6 +202,16 @@ async function runRealtimeRoundTrip(input: {
       }
     });
   }), 120000, "E2E 测试 120 秒超时");
+}
+
+function readCurrentProviderPool(config: ReturnType<typeof loadConfig>): LlmProviderPoolConfig {
+  const runtime = process.env.LLM_PROVIDER_POOL_JSON?.trim();
+  if (runtime) return parseLlmProviderPool(JSON.parse(runtime));
+  return createLegacyLlmProviderPool({
+    baseUrl: config.llm.baseUrl,
+    apiKey: config.llm.apiKey,
+    model: config.llm.model,
+  });
 }
 
 async function streamAudio(ws: WebSocket, audio: Buffer): Promise<void> {
