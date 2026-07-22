@@ -243,12 +243,16 @@ function sanitizeRecord(input: Record<string, unknown>, depth = 0): Record<strin
       continue;
     }
     if (Array.isArray(value)) {
-      const safe = value.slice(0, 20).flatMap((item) => {
-        if (typeof item === "number" && Number.isFinite(item)) return [item];
-        if (typeof item === "boolean") return [item];
-        if (item && typeof item === "object" && !Array.isArray(item)) return [sanitizeRecord(item as Record<string, unknown>, depth + 1)];
-        return [];
-      });
+      const safe: unknown[] = [];
+      for (const item of value.slice(0, 20)) {
+        if (typeof item === "number" && Number.isFinite(item)) {
+          safe.push(item);
+        } else if (typeof item === "boolean") {
+          safe.push(item);
+        } else if (item && typeof item === "object" && !Array.isArray(item)) {
+          safe.push(sanitizeRecord(item as Record<string, unknown>, depth + 1));
+        }
+      }
       if (safe.length) output[key] = safe;
       continue;
     }
