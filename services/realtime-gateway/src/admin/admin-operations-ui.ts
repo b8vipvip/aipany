@@ -1,6 +1,7 @@
 export const ADMIN_OPERATIONS_UI = String.raw`(() => {
   const STORAGE_KEY = "aipanyAdminToken";
   const $ = (id) => document.getElementById(id);
+  let operationsLoaded = false;
   const authHeaders = () => ({
     Authorization: "Bearer " + (sessionStorage.getItem(STORAGE_KEY) || ""),
     "Content-Type": "application/json",
@@ -35,36 +36,13 @@ export const ADMIN_OPERATIONS_UI = String.raw`(() => {
     security.id = "operationsSecurityCard";
     security.className = "card";
     security.style.marginTop = "18px";
-    security.innerHTML = `
-      <h3>控制面板访问保护</h3>
-      <div class="section-note">默认关闭。关闭时控制面板和管理 API 可直接访问，因此生产环境应至少使用反向代理鉴权、IP 白名单或开启此密码保护。开启后，浏览器需要输入这里设置的密码。</div>
-      <div class="grid">
-        <div class="field"><label>密码保护</label><select id="OPS_PASSWORD_ENABLED"><option value="false">关闭（直接访问）</option><option value="true">开启（需要密码）</option></select></div>
-        <div class="field"><label>新密码</label><input id="OPS_NEW_PASSWORD" type="password" autocomplete="new-password" placeholder="留空表示不修改；首次开启必须填写" /></div>
-      </div>
-      <div class="actions" style="margin-top:14px"><button class="btn primary" id="saveOperationsSecurityBtn">保存访问设置</button></div>
-      <div id="operationsSecurityStatus" class="status" style="margin-top:14px">读取中…</div>
-    `;
+    security.innerHTML = '<h3>控制面板访问保护</h3><div class="section-note">默认关闭。关闭时控制面板和管理 API 可直接访问，因此生产环境应至少使用反向代理鉴权、IP 白名单或开启此密码保护。开启后，浏览器需要输入这里设置的密码。</div><div class="grid"><div class="field"><label>密码保护</label><select id="OPS_PASSWORD_ENABLED"><option value="false">关闭（直接访问）</option><option value="true">开启（需要密码）</option></select></div><div class="field"><label>新密码</label><input id="OPS_NEW_PASSWORD" type="password" autocomplete="new-password" placeholder="留空表示不修改；首次开启必须填写" /></div></div><div class="actions" style="margin-top:14px"><button class="btn primary" id="saveOperationsSecurityBtn">保存访问设置</button></div><div id="operationsSecurityStatus" class="status" style="margin-top:14px">读取中…</div>';
     overview.appendChild(security);
 
     const sync = document.createElement("div");
     sync.id = "operationsGitHubCard";
     sync.className = "card";
-    sync.innerHTML = `
-      <h3>Observability GitHub 自动同步</h3>
-      <div class="section-note">同步的是强脱敏诊断事件，不包含对话正文、原始 Session ID、用户/租户/设备标识、IP、User-Agent、Token 或 API Key。事件按批次上传，避免每轮对话都产生一次 Git commit。当前主仓库 b8vipvip/aipany 是公开仓库，默认禁止上传到公开仓库，建议填写一个私有日志仓库。</div>
-      <div class="grid">
-        <div class="field"><label>自动同步</label><select id="OPS_GITHUB_ENABLED"><option value="false">关闭</option><option value="true">开启</option></select></div>
-        <div class="field"><label>批次间隔（秒）</label><input id="OPS_GITHUB_BATCH_SECONDS" type="number" min="30" max="3600" /></div>
-        <div class="field full"><label>目标仓库（owner/repo）</label><input id="OPS_GITHUB_REPOSITORY" placeholder="例如：b8vipvip/aipany-observability-private" /></div>
-        <div class="field"><label>分支</label><input id="OPS_GITHUB_BRANCH" placeholder="main" /></div>
-        <div class="field"><label>仓库目录</label><input id="OPS_GITHUB_PATH" placeholder="ops/observability" /></div>
-        <div class="field full"><label>GitHub Fine-grained Token <span id="OPS_GITHUB_TOKEN_STATE" class="badge">未配置</span></label><input id="OPS_GITHUB_TOKEN" type="password" placeholder="留空保留服务器已保存的 Token" /><div class="hint">Token 只保存在服务器 /data 的权限文件中，不会写入同步日志，也不会在 API 中回显。</div></div>
-        <div class="field full"><label><input id="OPS_GITHUB_ALLOW_PUBLIC" type="checkbox" style="width:auto;margin-right:8px" />我明确允许把强脱敏诊断事件同步到公开仓库</label><div class="hint">不勾选时，服务器会先检查仓库可见性；如果目标仓库是 Public，会拒绝上传。</div></div>
-      </div>
-      <div class="actions" style="margin-top:14px"><button class="btn primary" id="saveOperationsGitHubBtn">保存同步设置</button><button class="btn secondary" id="testOperationsGitHubBtn">测试 GitHub 连接</button></div>
-      <div id="operationsGitHubStatus" class="status" style="margin-top:14px">读取中…</div>
-    `;
+    sync.innerHTML = '<h3>Observability GitHub 自动同步</h3><div class="section-note">同步的是强脱敏诊断事件，不包含对话正文、原始 Session ID、用户/租户/设备标识、IP、User-Agent、Token 或 API Key。事件按批次上传，避免每轮对话都产生一次 Git commit。当前主仓库 b8vipvip/aipany 是公开仓库，默认禁止上传到公开仓库，建议填写一个私有日志仓库。</div><div class="grid"><div class="field"><label>自动同步</label><select id="OPS_GITHUB_ENABLED"><option value="false">关闭</option><option value="true">开启</option></select></div><div class="field"><label>批次间隔（秒）</label><input id="OPS_GITHUB_BATCH_SECONDS" type="number" min="30" max="3600" /></div><div class="field full"><label>目标仓库（owner/repo）</label><input id="OPS_GITHUB_REPOSITORY" placeholder="例如：b8vipvip/aipany-observability-private" /></div><div class="field"><label>分支</label><input id="OPS_GITHUB_BRANCH" placeholder="main" /></div><div class="field"><label>仓库目录</label><input id="OPS_GITHUB_PATH" placeholder="ops/observability" /></div><div class="field full"><label>GitHub Fine-grained Token <span id="OPS_GITHUB_TOKEN_STATE" class="badge">未配置</span></label><input id="OPS_GITHUB_TOKEN" type="password" placeholder="留空保留服务器已保存的 Token" /><div class="hint">Token 只保存在服务器 /data 的权限文件中，不会写入同步日志，也不会在 API 中回显。</div></div><div class="field full"><label><input id="OPS_GITHUB_ALLOW_PUBLIC" type="checkbox" style="width:auto;margin-right:8px" />我明确允许把强脱敏诊断事件同步到公开仓库</label><div class="hint">不勾选时，服务器会先检查仓库可见性；如果目标仓库是 Public，会拒绝上传。</div></div></div><div class="actions" style="margin-top:14px"><button class="btn primary" id="saveOperationsGitHubBtn">保存同步设置</button><button class="btn secondary" id="testOperationsGitHubBtn">测试 GitHub 连接</button></div><div id="operationsGitHubStatus" class="status" style="margin-top:14px">读取中…</div>';
     overview.appendChild(sync);
 
     $("saveOperationsSecurityBtn").onclick = saveSecurity;
@@ -96,6 +74,7 @@ export const ADMIN_OPERATIONS_UI = String.raw`(() => {
       ? "自动同步已开启。事件会按批次上传到 " + github.repository + "/" + github.path
       : "自动同步已关闭。服务器仍会继续写入本地 JSONL。";
     $("operationsGitHubStatus").className = "status " + (github.enabled ? "ok" : "");
+    operationsLoaded = true;
   }
 
   async function saveSecurity() {
@@ -163,7 +142,20 @@ export const ADMIN_OPERATIONS_UI = String.raw`(() => {
     }
   }
 
+  function watchForSuccessfulLogin() {
+    const app = $("app");
+    if (!app || typeof MutationObserver === "undefined") return;
+    const observer = new MutationObserver(() => {
+      if (!app.classList.contains("hidden") && !operationsLoaded) {
+        loadOperations().catch(() => undefined);
+      }
+    });
+    observer.observe(app, { attributes: true, attributeFilter: ["class"] });
+  }
+
   async function bootstrap() {
+    installCards();
+    watchForSuccessfulLogin();
     let status;
     try {
       status = await jsonRequest("/admin/api/operations/auth-status");
