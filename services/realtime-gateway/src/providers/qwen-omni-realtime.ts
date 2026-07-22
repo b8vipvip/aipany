@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import WebSocket from "ws";
+import { isQwenAudioRealtimeModel } from "../mobile/realtime-experience.js";
 
 export interface QwenOmniRealtimeConfig {
   apiKey: string;
@@ -9,7 +10,7 @@ export interface QwenOmniRealtimeConfig {
   model: string;
   voice: string;
   instructions: string;
-  turnDetection: "server_vad" | "semantic_vad";
+  turnDetection: "server_vad" | "semantic_vad" | "smart_turn";
   vadThreshold: number;
   silenceMs: number;
 }
@@ -31,11 +32,11 @@ interface QwenOmniRealtimeEvents {
 }
 
 /**
- * Thin server-side bridge to Qwen-Omni-Realtime.
+ * Server-side bridge for Alibaba Cloud realtime speech-to-speech models.
  *
- * The mobile client keeps speaking to Aipany's stable binary-PCM WebSocket
- * protocol while this provider converts the stream to the JSON/base64 event
- * format used by the upstream native speech-to-speech service.
+ * The original implementation targeted Qwen3.5-Omni-Realtime. Qwen-Audio
+ * 3.0 Realtime uses the same event-driven WebSocket family, with model-specific
+ * session fields and smart_turn semantics handled here.
  */
 export class QwenOmniRealtimeClient extends EventEmitter<QwenOmniRealtimeEvents> {
   private ws?: WebSocket;
@@ -81,19 +82,20 @@ export class QwenOmniRealtimeClient extends EventEmitter<QwenOmniRealtimeEvents>
           const type = typeof event.type === "string" ? event.type : "";
 
           if (type === "session.created") {
-            this.send({
-              event_id: randomUUID(),
-              type: "session.update",
-              session: {
-                modalities: ["text", "audio"],
-                voice: this.config.voice,
-                input_audio_format: "pcm",
-                output_audio_format: "pcm",
-                input_audio_transcription: { model: "qwen3-asr-flash-realtime" },
-                instructions: this.config.instructions,
-                turn_detection: this.buildTurnDetection(),
-              },
-            });
+            const session: Record<string, unknown> = {
+              modalities: isQwenAudioRealtimeModel(this.config.model) ? ["audio", "text"] : ["text", "audio"],
+              voice: this.config.voice,
+              input_audio_format: "pcm",
+              output_audio_format: "pcm",
+              instructions: this.config.instructions,
+              turn_detection: this.buildTurnDetection(),
+            };
+            // Qwen-Audio Realtime emits input transcripts natively. Qwen3.5
+            // Omni keeps the explicit helper transcription model for subtitles.
+            if (!isQwenAudioRealtimeModel(this.config.model)) {
+              session.input_audio_transcription = { model: "qwen3-asr-flash-realtime" };
+            }
+            this.send({ event_id: randomUUID(), type: "session.update", session });
             return;
           }
 
@@ -182,7 +184,7 @@ export class QwenOmniRealtimeClient extends EventEmitter<QwenOmniRealtimeEvents>
             const detail = objectValue(event.error);
             const code = stringValue(detail?.code);
             const message = stringValue(detail?.message) || "未知错误";
-            this.emit("error", new Error(`Qwen Omni Realtime 错误${code ? `(${code})` : ""}：${message}`));
+            this.emit("error", new Error(`Qwen Realtime 错误${code ? `(${code})` : ""}：${message}`));
           }
         } catch (error) {
           this.emit("error", error instanceof Error ? error : new Error(String(error)));
@@ -195,7 +197,7 @@ export class QwenOmniRealtimeClient extends EventEmitter<QwenOmniRealtimeEvents>
         this.ws = undefined;
         if (!settled) {
           settled = true;
-          reject(new Error(`Qwen Omni Realtime 在初始化前关闭：${code} ${reason.toString()}`.trim()));
+          reject(new Error(`Qwen Realtime 在初始化前关闭：${code} ${reason.toString()}`.trim()));
         }
         if (!this.closed) this.emit("close", code, reason.toString());
       });
@@ -206,8 +208,7 @@ export class QwenOmniRealtimeClient extends EventEmitter<QwenOmniRealtimeEvents>
   appendAudio(audio: Buffer): void {
     if (this.closed || audio.length === 0) return;
     this.audioBuffer = this.audioBuffer.length ? Buffer.concat([this.audioBuffer, audio]) : Buffer.from(audio);
-    // 16 kHz / PCM16 / mono: 1280 bytes = 40 ms. This keeps interruption
-    // latency low while avoiding one JSON envelope for every 20 ms frame.
+    // 16 kHz / PCM16 / mono: 1280 bytes = 40 ms.
     while (this.audioBuffer.length >= 1280) {
       const chunk = this.audioBuffer.subarray(0, 1280);
       this.audioBuffer = this.audioBuffer.subarray(1280);
@@ -219,6 +220,25 @@ export class QwenOmniRealtimeClient extends EventEmitter<QwenOmniRealtimeEvents>
     this.flushAudio();
     this.send({ event_id: randomUUID(), type: "input_audio_buffer.commit" });
     this.send({ event_id: randomUUID(), type: "response.create" });
+  }
+
+  requestTextResponse(text: string): boolean {
+    if (!this.ready || !text.trim()) return false;
+    const created = this.send({
+      event_id: randomUUID(),
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: text.trim() }],
+      },
+    });
+    if (!created) return false;
+    return this.send({
+      event_id: randomUUID(),
+      type: "response.create",
+      response: { modalities: ["audio", "text"] },
+    });
   }
 
   cancelResponse(): void {
@@ -262,11 +282,22 @@ export class QwenOmniRealtimeClient extends EventEmitter<QwenOmniRealtimeEvents>
   }
 
   private buildTurnDetection(): Record<string, unknown> {
+    if (this.config.turnDetection === "smart_turn") {
+      return { type: "smart_turn" };
+    }
     if (this.config.turnDetection === "semantic_vad") {
+      if (isQwenAudioRealtimeModel(this.config.model)) return { type: "smart_turn" };
       return {
         type: "semantic_vad",
         create_response: true,
         interrupt_response: true,
+      };
+    }
+    if (isQwenAudioRealtimeModel(this.config.model)) {
+      return {
+        type: "server_vad",
+        threshold: this.config.vadThreshold,
+        silence_duration_ms: this.config.silenceMs,
       };
     }
     return {
