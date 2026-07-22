@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import { loadConfig } from "../src/config.js";
 import { getNativeLiveCapabilityDiagnostic } from "../src/observability/native-live-diagnostics.js";
 
@@ -16,7 +16,7 @@ const MANAGED_KEYS = [
   "QWEN_OMNI_REALTIME_SILENCE_MS",
 ] as const;
 
-function withEnv(t: test.TestContext, values: Partial<Record<(typeof MANAGED_KEYS)[number], string | undefined>>): void {
+function withEnv(t: TestContext, values: Partial<Record<(typeof MANAGED_KEYS)[number], string | undefined>>): void {
   const previous = new Map<string, string | undefined>();
   for (const key of MANAGED_KEYS) previous.set(key, process.env[key]);
   for (const key of MANAGED_KEYS) {
