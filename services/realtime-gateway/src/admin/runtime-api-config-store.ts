@@ -207,8 +207,8 @@ function validateValue(key: ManagedRuntimeKey, value: string): string {
   if (key === "AIPANY_REALTIME_ENGINE" && !["auto", "cascaded", "omni_realtime"].includes(value)) {
     throw new Error("AIPANY_REALTIME_ENGINE 只能是 auto / cascaded / omni_realtime");
   }
-  if (key === "QWEN_OMNI_REALTIME_TURN_DETECTION" && !["server_vad", "semantic_vad"].includes(value)) {
-    throw new Error("QWEN_OMNI_REALTIME_TURN_DETECTION 只能是 server_vad / semantic_vad");
+  if (key === "QWEN_OMNI_REALTIME_TURN_DETECTION" && !["server_vad", "semantic_vad", "smart_turn"].includes(value)) {
+    throw new Error("QWEN_OMNI_REALTIME_TURN_DETECTION 只能是 server_vad / semantic_vad / smart_turn");
   }
   if (key === "QWEN_OMNI_REALTIME_VAD_THRESHOLD") {
     const number = Number(value);
