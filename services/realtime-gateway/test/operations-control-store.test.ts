@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import { OperationsControlStore } from "../src/operations/operations-control-store.js";
 
-async function withStore(t: test.TestContext) {
+async function withStore(t: TestContext) {
   const directory = await mkdtemp(join(tmpdir(), "aipany-operations-"));
   t.after(async () => {
     await rm(directory, { recursive: true, force: true });
