@@ -25,7 +25,7 @@ import { StreamingAudioFrontEnd } from "../audio/streaming-audio-front-end.js";
 import { QwenAsrRealtimeClient } from "../providers/qwen-asr.js";
 import { QwenTtsRealtimeClient } from "../providers/qwen-tts.js";
 import { OpenAiCompatibleLlm, type ChatMessage } from "../providers/openai-compatible-llm.js";
-import { EmotionDirector } from "../pipeline/emotion-director.js";
+import { LiveHumanizer } from "../pipeline/live-humanizer.js";
 import { StreamingTextChunker } from "../pipeline/text-chunker.js";
 import { buildEnvironmentInstruction, evaluateSocialTurn } from "../social/social-turn-evaluator.js";
 import {
@@ -50,7 +50,7 @@ export class RealtimeSession {
   readonly id = randomUUID();
   private asr?: QwenAsrRealtimeClient;
   private readonly llm: OpenAiCompatibleLlm;
-  private readonly emotionDirector = new EmotionDirector();
+  private readonly liveHumanizer = new LiveHumanizer();
   private history: ChatMessage[] = [];
   private activeResponse?: ActiveResponse;
   private audioIntelligence?: AudioIntelligenceEngine;
@@ -627,6 +627,15 @@ export class RealtimeSession {
     if (this.recentHumanTurns.length > 20) this.recentHumanTurns.splice(0, this.recentHumanTurns.length - 20);
     if (socialAction === "stay_silent") return;
 
+    const humanizer = this.liveHumanizer.direct({
+      userEmotion: emotion,
+      userText: socialText,
+      interactionMode: modeState?.configuredMode ?? "auto",
+      socialAction,
+      proactivity: this.socialProactivity,
+      secondsSinceAiSpoke: this.lastAiSpokeAt > 0 ? (Date.now() - this.lastAiSpokeAt) / 1000 : 999,
+    });
+
     const requestMessages = [...this.history];
     if (modeState) {
       requestMessages.push({
@@ -639,6 +648,7 @@ export class RealtimeSession {
     }
     const environmentInstruction = buildEnvironmentInstruction(environment);
     if (environmentInstruction) requestMessages.push({ role: "system", content: environmentInstruction });
+    requestMessages.push({ role: "system", content: humanizer.responseInstruction });
 
     const response: ActiveResponse = {
       id: randomUUID(),
@@ -648,7 +658,6 @@ export class RealtimeSession {
     this.activeResponse = response;
     this.send({ type: "response.created", responseId: response.id });
 
-    const direction = this.emotionDirector.direct(emotion);
     const tts = new QwenTtsRealtimeClient(
       {
         apiKey: this.config.qwen.apiKey,
@@ -660,7 +669,7 @@ export class RealtimeSession {
         sampleRate: this.config.qwen.ttsSampleRate,
         optimizeInstructions: this.config.qwen.optimizeInstructions,
       },
-      direction.instructions,
+      humanizer.ttsInstructions,
     );
     response.tts = tts;
 
@@ -677,7 +686,12 @@ export class RealtimeSession {
     tts.on("error", (error) => this.sendError("TTS_ERROR", error.message, true));
 
     const ttsReady = tts.connect();
-    const chunker = new StreamingTextChunker();
+    const chunker = new StreamingTextChunker(
+      humanizer.chunking.minChars,
+      humanizer.chunking.maxChars,
+      humanizer.chunking.firstChunkMinChars,
+      humanizer.chunking.firstChunkMaxChars,
+    );
     let assistantText = "";
 
     try {
