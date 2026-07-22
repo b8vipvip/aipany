@@ -107,6 +107,7 @@ class RealtimeClient(
                                 .put("agentId", "default-agent")
                                 .put("locale", "zh-CN")
                                 .put("assistantAliases", JSONArray(spec.settings.aliases()))
+                                .put("experienceMode", spec.settings.experienceMode)
                                 .put("interactionMode", spec.settings.interactionMode)
                                 .put("socialProactivity", spec.settings.socialProactivity.toDouble())
                                 .put("outputVoice", spec.settings.voiceId)

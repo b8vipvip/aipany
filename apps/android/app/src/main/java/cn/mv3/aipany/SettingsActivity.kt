@@ -3,7 +3,11 @@ package cn.mv3.aipany
 import android.app.Activity
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioTrack
 import android.os.Bundle
+import android.provider.Settings
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -16,12 +20,17 @@ import android.widget.SeekBar
 import android.widget.Spinner
 import android.widget.Switch
 import android.widget.TextView
+import android.widget.Toast
 import kotlin.math.roundToInt
 
 class SettingsActivity : Activity() {
-    private lateinit var voices: List<ClientVoiceOption>
+    private var experienceModes: List<ClientExperienceModeOption> = emptyList()
+    private var voices: List<ClientVoiceOption> = emptyList()
+    private lateinit var experienceSpinner: Spinner
+    private lateinit var experienceDescription: TextView
     private lateinit var voiceSpinner: Spinner
     private lateinit var voiceDescription: TextView
+    private lateinit var previewButton: Button
     private lateinit var modeSpinner: Spinner
     private lateinit var proactivitySeek: SeekBar
     private lateinit var proactivityValue: TextView
@@ -29,12 +38,28 @@ class SettingsActivity : Activity() {
     private lateinit var endpointSpinner: Spinner
     private lateinit var bargeInSwitch: Switch
     private lateinit var transcriptSwitch: Switch
+    private lateinit var mobileApi: MobileApiClient
+    private var previewToken: String? = null
+    private var previewTrack: AudioTrack? = null
+    private var loadingValues = true
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        voices = ClientCapabilitiesCache.loadVoices(this)
+        mobileApi = MobileApiClient()
+        experienceModes = ClientCapabilitiesCache.loadExperienceModes(this)
+        val initial = AppSettings.load(this)
+        voices = selectedMode(initial.experienceMode)?.voices.orEmpty().ifEmpty { ClientCapabilitiesCache.loadVoices(this) }
         buildUi()
-        loadValues()
+        loadValues(initial)
+        loadingValues = false
+    }
+
+    override fun onDestroy() {
+        previewTrack?.stopSafely()
+        previewTrack?.release()
+        previewTrack = null
+        mobileApi.release()
+        super.onDestroy()
     }
 
     private fun buildUi() {
@@ -61,14 +86,35 @@ class SettingsActivity : Activity() {
                 setTextColor(Color.rgb(20, 28, 48))
             })
             addView(TextView(this@SettingsActivity).apply {
-                text = "让声音和对话方式更像你喜欢的样子"
+                text = "三种实时体验模式 · 当前开发阶段不涉及订阅或收费"
                 textSize = 13f
                 setTextColor(Color.rgb(100, 112, 138))
             })
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         root.addView(header)
 
-        val voiceCard = card(root, "声音", "选择小派回答时使用的实时音色")
+        val experienceCard = card(root, "实时体验模式", "按体验路线切换底层实时语音架构，保存后自动重新连接")
+        experienceSpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(
+                this@SettingsActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                experienceModes.map { it.title },
+            )
+        }
+        experienceCard.addView(experienceSpinner, matchWrap(top = 10))
+        experienceDescription = TextView(this).apply {
+            textSize = 13f
+            setTextColor(Color.rgb(96, 107, 128))
+            setPadding(0, dp(8), 0, 0)
+        }
+        experienceCard.addView(experienceDescription)
+        experienceSpinner.setOnItemSelectedListener(SimpleItemSelectedListener { position ->
+            val selected = experienceModes.getOrNull(position) ?: return@SimpleItemSelectedListener
+            experienceDescription.text = "${selected.subtitle}\n模型：${selected.model}"
+            refreshVoicesForMode(selected, preserveVoice = !loadingValues)
+        })
+
+        val voiceCard = card(root, "声音", "Native Live 音色来自当前模型支持列表，可直接试听实际模型声音")
         voiceSpinner = Spinner(this)
         voiceSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, voices.map { it.displayName() })
         voiceCard.addView(voiceSpinner, matchWrap(top = 10))
@@ -80,7 +126,14 @@ class SettingsActivity : Activity() {
         voiceCard.addView(voiceDescription)
         voiceSpinner.setOnItemSelectedListener(SimpleItemSelectedListener { position ->
             voiceDescription.text = voices.getOrNull(position)?.description.orEmpty()
+            updatePreviewButton()
         })
+        previewButton = Button(this).apply {
+            text = "试听声音"
+            textSize = 14f
+            setOnClickListener { previewSelectedVoice() }
+        }
+        voiceCard.addView(previewButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)).apply { topMargin = dp(12) })
 
         val conversationCard = card(root, "对话方式", "这些设置由 Aipany 实时会话原生支持")
         label(conversationCard, "交互模式")
@@ -129,8 +182,8 @@ class SettingsActivity : Activity() {
         }
         conversationCard.addView(aliasesInput, matchWrap())
 
-        val realtimeCard = card(root, "实时体验", "本地断句决定你说完后多快提交给服务端")
-        label(realtimeCard, "自动断句速度")
+        val realtimeCard = card(root, "实时控制", "Economy Live 使用本地断句；Native Live 主要使用模型侧 Smart Turn / VAD")
+        label(realtimeCard, "本地自动断句速度")
         endpointSpinner = Spinner(this).apply {
             adapter = ArrayAdapter(
                 this@SettingsActivity,
@@ -140,7 +193,7 @@ class SettingsActivity : Activity() {
         }
         realtimeCard.addView(endpointSpinner, matchWrap())
         bargeInSwitch = addSwitch(realtimeCard, "允许随时打断小派", "你一开口就立即停止当前 AI 播放并开始新一轮", true)
-        transcriptSwitch = addSwitch(realtimeCard, "显示实时识别文字", "主界面显示你说的话和 ASR 实时结果", true)
+        transcriptSwitch = addSwitch(realtimeCard, "显示实时识别文字", "主界面显示你说的话和实时转写结果", true)
 
         root.addView(Button(this).apply {
             text = "保存并应用"
@@ -151,7 +204,7 @@ class SettingsActivity : Activity() {
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(54)).apply { topMargin = dp(22) })
 
         root.addView(TextView(this).apply {
-            text = "保存后主界面会自动重新连接，让新的音色和会话偏好立即生效。"
+            text = "保存后主界面会自动重新连接，让新的体验模式、模型路线和音色立即生效。"
             textSize = 12f
             gravity = Gravity.CENTER
             setTextColor(Color.rgb(128, 138, 158))
@@ -161,9 +214,14 @@ class SettingsActivity : Activity() {
         setContentView(ScrollView(this).apply { addView(root) })
     }
 
-    private fun loadValues() {
-        val settings = AppSettings.load(this)
-        voiceSpinner.setSelection(voices.indexOfFirst { it.id == settings.voiceId }.coerceAtLeast(0))
+    private fun loadValues(settings: AppSettings) {
+        val modePosition = experienceModes.indexOfFirst { it.id == settings.experienceMode }.takeIf { it >= 0 } ?: 0
+        experienceSpinner.setSelection(modePosition)
+        val mode = experienceModes.getOrNull(modePosition)
+        if (mode != null) {
+            experienceDescription.text = "${mode.subtitle}\n模型：${mode.model}"
+            refreshVoicesForMode(mode, preserveVoice = false, preferredVoice = settings.voiceId)
+        }
         modeSpinner.setSelection(when (settings.interactionMode) {
             "owner_focus" -> 1
             "group" -> 2
@@ -175,13 +233,118 @@ class SettingsActivity : Activity() {
         endpointSpinner.setSelection(EndpointProfile.entries.indexOf(settings.endpointProfile).coerceAtLeast(0))
         bargeInSwitch.isChecked = settings.bargeInEnabled
         transcriptSwitch.isChecked = settings.showTranscript
+        updatePreviewButton()
+    }
+
+    private fun refreshVoicesForMode(
+        mode: ClientExperienceModeOption,
+        preserveVoice: Boolean,
+        preferredVoice: String? = null,
+    ) {
+        val previous = if (preserveVoice) voices.getOrNull(voiceSpinner.selectedItemPosition)?.id else preferredVoice
+        voices = mode.voices
+        voiceSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, voices.map { it.displayName() })
+        val target = previous?.takeIf { value -> voices.any { it.id == value } } ?: mode.defaultVoice
+        voiceSpinner.setSelection(voices.indexOfFirst { it.id == target }.coerceAtLeast(0))
+        voiceDescription.text = voices.getOrNull(voiceSpinner.selectedItemPosition)?.description.orEmpty()
+        updatePreviewButton()
+    }
+
+    private fun previewSelectedVoice() {
+        val mode = experienceModes.getOrNull(experienceSpinner.selectedItemPosition) ?: return
+        val voice = voices.getOrNull(voiceSpinner.selectedItemPosition) ?: return
+        if (mode.engine != "omni_realtime" || !voice.previewable) {
+            Toast.makeText(this, "当前模式的独立音色试听将在 Economy Live Humanizer 阶段继续完善", Toast.LENGTH_SHORT).show()
+            return
+        }
+        previewButton.isEnabled = false
+        previewButton.text = "正在生成试听…"
+        ensurePreviewToken { tokenResult ->
+            tokenResult.onSuccess { token ->
+                mobileApi.previewVoice(token, mode.model, voice.id) { result ->
+                    runOnUiThread {
+                        previewButton.isEnabled = true
+                        previewButton.text = "试听声音"
+                        result.onSuccess { playPreview(it) }
+                            .onFailure { Toast.makeText(this, it.message ?: "音色试听失败", Toast.LENGTH_LONG).show() }
+                    }
+                }
+            }.onFailure {
+                runOnUiThread {
+                    previewButton.isEnabled = true
+                    previewButton.text = "试听声音"
+                    Toast.makeText(this, it.message ?: "无法获取试听会话", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    private fun ensurePreviewToken(callback: (Result<String>) -> Unit) {
+        previewToken?.takeIf { it.isNotBlank() }?.let {
+            callback(Result.success(it))
+            return
+        }
+        val deviceId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID)
+            ?: "android-preview-${System.currentTimeMillis()}"
+        mobileApi.bootstrap(deviceId) { result ->
+            result.map { session ->
+                previewToken = session.token
+                session.token
+            }.let(callback)
+        }
+    }
+
+    private fun playPreview(audio: ByteArray) {
+        previewTrack?.stopSafely()
+        previewTrack?.release()
+        val minBuffer = AudioTrack.getMinBufferSize(
+            PREVIEW_SAMPLE_RATE,
+            AudioFormat.CHANNEL_OUT_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+        ).coerceAtLeast(audio.size)
+        val track = AudioTrack.Builder()
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build(),
+            )
+            .setAudioFormat(
+                AudioFormat.Builder()
+                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .setSampleRate(PREVIEW_SAMPLE_RATE)
+                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                    .build(),
+            )
+            .setBufferSizeInBytes(minBuffer)
+            .setTransferMode(AudioTrack.MODE_STATIC)
+            .build()
+        val written = track.write(audio, 0, audio.size)
+        if (written <= 0) {
+            track.release()
+            Toast.makeText(this, "试听音频播放失败", Toast.LENGTH_SHORT).show()
+            return
+        }
+        previewTrack = track
+        track.play()
+    }
+
+    private fun updatePreviewButton() {
+        if (!::previewButton.isInitialized || !::voiceSpinner.isInitialized) return
+        val mode = experienceModes.getOrNull(experienceSpinner.selectedItemPosition)
+        val voice = voices.getOrNull(voiceSpinner.selectedItemPosition)
+        val available = mode?.engine == "omni_realtime" && voice?.previewable == true
+        previewButton.isEnabled = available
+        previewButton.text = if (available) "试听声音" else "Economy 音色试听后续开放"
     }
 
     private fun saveAndFinish() {
         val current = AppSettings.load(this)
+        val experience = experienceModes.getOrNull(experienceSpinner.selectedItemPosition)
         AppSettings.save(
             this,
             current.copy(
+                experienceMode = experience?.id ?: current.experienceMode,
                 voiceId = voices.getOrNull(voiceSpinner.selectedItemPosition)?.id ?: current.voiceId,
                 interactionMode = when (modeSpinner.selectedItemPosition) {
                     1 -> "owner_focus"
@@ -198,6 +361,8 @@ class SettingsActivity : Activity() {
         setResult(RESULT_OK)
         finish()
     }
+
+    private fun selectedMode(id: String): ClientExperienceModeOption? = experienceModes.firstOrNull { it.id == id }
 
     private fun card(parent: LinearLayout, title: String, subtitle: String): LinearLayout {
         return LinearLayout(this).apply {
@@ -266,6 +431,14 @@ class SettingsActivity : Activity() {
     ).apply { topMargin = dp(top) }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).roundToInt()
+
+    companion object {
+        private const val PREVIEW_SAMPLE_RATE = 24_000
+    }
+}
+
+private fun AudioTrack.stopSafely() {
+    runCatching { if (playState == AudioTrack.PLAYSTATE_PLAYING) stop() }
 }
 
 private class SimpleItemSelectedListener(
