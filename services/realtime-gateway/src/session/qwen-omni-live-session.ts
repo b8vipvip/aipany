@@ -11,7 +11,15 @@ import { assertSessionIdentity, requireScope, type AuthContext } from "../auth.j
 import type { AppConfig } from "../config.js";
 import { resolveRequestedVoice } from "../mobile/client-capabilities.js";
 import type { SessionObservability } from "../observability/realtime-observability.js";
-import { QwenOmniRealtimeClient } from "../providers/qwen-omni-realtime.js";
+import {
+  QwenOmniRealtimeClient,
+  type QwenOmniRealtimeConfig,
+} from "../providers/qwen-omni-realtime.js";
+
+const RECOVERY_DELAYS_MS = [0, 500, 1500] as const;
+const RECOVERY_AUDIO_BUFFER_MAX_BYTES = 96_000; // 3 seconds of 16 kHz PCM16 mono.
+
+type QwenOmniRealtimeClientFactory = (config: QwenOmniRealtimeConfig) => QwenOmniRealtimeClient;
 
 /**
  * Native speech-to-speech session backed by Qwen-Omni-Realtime.
@@ -30,10 +38,13 @@ export class QwenOmniLiveSession {
   private aliases: string[] = ["Aipany", "小派"];
   private socialProactivity = 0.45;
   private systemPrompt = "";
+  private voice = "";
   private activeResponseId?: string;
   private readonly audioStarted = new Set<string>();
   private readonly responseText = new Map<string, string>();
   private transcriptBuffer = "";
+  private recoveryPromise?: Promise<void>;
+  private recoveryAudioBuffer = Buffer.alloc(0);
 
   constructor(
     private readonly client: WebSocket,
@@ -41,6 +52,7 @@ export class QwenOmniLiveSession {
     private readonly authContext: AuthContext,
     private readonly telemetry?: SessionObservability,
     sessionId?: string,
+    private readonly providerFactory: QwenOmniRealtimeClientFactory = (providerConfig) => new QwenOmniRealtimeClient(providerConfig),
   ) {
     this.id = sessionId ?? randomUUID();
   }
@@ -57,98 +69,13 @@ export class QwenOmniLiveSession {
     this.aliases = event.session.assistantAliases;
     this.socialProactivity = event.session.socialProactivity;
     this.systemPrompt = event.session.systemPrompt?.trim() || this.config.conversation.defaultSystemPrompt;
-    const voice = resolveRequestedVoice(
+    this.voice = resolveRequestedVoice(
       this.config.qwenOmniRealtime.model,
       this.config.qwenOmniRealtime.voice,
       event.session.outputVoice,
     );
 
-    const provider = new QwenOmniRealtimeClient({
-      apiKey: this.config.qwenOmniRealtime.apiKey,
-      workspaceId: this.config.qwenOmniRealtime.workspaceId,
-      baseUrl: this.config.qwenOmniRealtime.baseUrl,
-      model: this.config.qwenOmniRealtime.model,
-      voice,
-      instructions: this.buildInstructions(),
-      turnDetection: this.config.qwenOmniRealtime.turnDetection,
-      vadThreshold: this.config.qwenOmniRealtime.vadThreshold,
-      silenceMs: this.config.qwenOmniRealtime.silenceMs,
-    });
-    this.provider = provider;
-
-    // Forwarded client-protocol events are observed once by server.ts through
-    // instrumentOutgoingWebSocket(). Do not record the same semantic event here,
-    // otherwise Native Live turns, interruptions and latency samples are doubled.
-    provider.on("speechStarted", () => {
-      this.transcriptBuffer = "";
-      this.send({ type: "input_audio_buffer.speech_started" });
-    });
-    provider.on("speechStopped", () => {
-      this.send({ type: "input_audio_buffer.speech_stopped" });
-    });
-    provider.on("transcriptDelta", (delta) => {
-      this.transcriptBuffer += delta;
-      this.send({ type: "transcript.partial", text: this.transcriptBuffer, emotion: "unknown" });
-    });
-    provider.on("transcriptFinal", (text) => {
-      this.transcriptBuffer = text;
-      this.send({ type: "transcript.final", text, emotion: "unknown" });
-    });
-    provider.on("responseCreated", (responseId) => {
-      this.activeResponseId = responseId;
-      this.responseText.set(responseId, "");
-      this.send({ type: "response.created", responseId });
-    });
-    provider.on("textDelta", (responseId, delta) => {
-      const previous = this.responseText.get(responseId) ?? "";
-      this.responseText.set(responseId, previous + delta);
-      this.send({ type: "response.text.delta", responseId, delta });
-    });
-    provider.on("audio", (responseId, audio) => {
-      if (!this.audioStarted.has(responseId)) {
-        this.audioStarted.add(responseId);
-        this.send({ type: "response.audio.started", responseId, format: OUTPUT_AUDIO_FORMAT });
-      }
-      if (this.client.readyState === WebSocket.OPEN) this.client.send(audio, { binary: true });
-    });
-    provider.on("audioDone", (responseId) => {
-      this.send({ type: "response.audio.done", responseId });
-    });
-    provider.on("interrupted", (responseId, reason) => {
-      this.send({ type: "response.interrupted", responseId, reason: reason === "barge_in" ? "barge_in" : "client_cancel" });
-      if (this.activeResponseId === responseId) this.activeResponseId = undefined;
-    });
-    provider.on("responseDone", (responseId, text, _status) => {
-      this.send({ type: "response.done", responseId, text });
-      this.responseText.delete(responseId);
-      this.audioStarted.delete(responseId);
-      if (this.activeResponseId === responseId) this.activeResponseId = undefined;
-    });
-    provider.on("error", (error) => {
-      this.telemetry?.event("omni.error", { message: error.message }, "error", "omni");
-      // Before session.ready the server may transparently fall back to the
-      // cascaded engine, so do not leak a transient upstream startup error to
-      // the client. After ready it is a real live-session error and is surfaced.
-      if (this.providerReady) this.sendError("OMNI_REALTIME_ERROR", error.message, true);
-    });
-    provider.on("close", (code, reason) => {
-      if (this.closed) return;
-      this.telemetry?.event("omni.closed", { code, reason }, code === 1000 ? "info" : "warn", "omni");
-      if (this.providerReady) {
-        this.sendError("OMNI_REALTIME_CLOSED", `Qwen Omni Realtime 连接关闭：${code} ${reason}`.trim(), true);
-        // Do not leave the mobile client attached to a dead upstream session.
-        // A 1011 close enters the Android exponential reconnect loop; the next
-        // connection can recover Native Live or fall back to Cascaded in Auto.
-        queueMicrotask(() => {
-          if (this.client.readyState === WebSocket.OPEN || this.client.readyState === WebSocket.CONNECTING) {
-            this.client.close(1011, "omni upstream closed");
-          }
-        });
-      }
-    });
-
-    await provider.connect();
-    this.providerReady = true;
+    await this.openProvider();
     this.send({
       type: "session.created",
       sessionId: this.id,
@@ -157,13 +84,17 @@ export class QwenOmniLiveSession {
     });
     this.sendModeState();
     this.send({ type: "speaker.consent.updated", granted: false });
-    this.telemetry?.event("omni.session.ready", { upstream: "qwen-omni-realtime", voice }, "info", "omni");
+    this.telemetry?.event("omni.session.ready", { upstream: "qwen-omni-realtime", voice: this.voice }, "info", "omni");
     this.send({ type: "session.ready", sessionId: this.id });
   }
 
   appendAudio(audio: Buffer): void {
-    if (!this.started || this.closed) return;
-    this.provider?.appendAudio(audio);
+    if (!this.started || this.closed || audio.length === 0) return;
+    if (this.providerReady && this.provider) {
+      this.provider.appendAudio(audio);
+      return;
+    }
+    if (this.recoveryPromise) this.bufferRecoveryAudio(audio);
   }
 
   commitAudio(): void {
@@ -223,9 +154,184 @@ export class QwenOmniLiveSession {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.recoveryAudioBuffer = Buffer.alloc(0);
     this.provider?.close();
     this.provider = undefined;
     this.providerReady = false;
+  }
+
+  private async openProvider(): Promise<void> {
+    const provider = this.providerFactory({
+      apiKey: this.config.qwenOmniRealtime.apiKey,
+      workspaceId: this.config.qwenOmniRealtime.workspaceId,
+      baseUrl: this.config.qwenOmniRealtime.baseUrl,
+      model: this.config.qwenOmniRealtime.model,
+      voice: this.voice,
+      instructions: this.buildInstructions(),
+      turnDetection: this.config.qwenOmniRealtime.turnDetection,
+      vadThreshold: this.config.qwenOmniRealtime.vadThreshold,
+      silenceMs: this.config.qwenOmniRealtime.silenceMs,
+    });
+    this.provider = provider;
+    this.bindProvider(provider);
+    await provider.connect();
+    if (this.closed || this.provider !== provider) {
+      provider.close();
+      throw new Error("Native Live 会话在上游连接完成前已经关闭");
+    }
+    this.providerReady = true;
+  }
+
+  private bindProvider(provider: QwenOmniRealtimeClient): void {
+    // Forwarded client-protocol events are observed once by server.ts through
+    // instrumentOutgoingWebSocket(). Do not record the same semantic event here,
+    // otherwise Native Live turns, interruptions and latency samples are doubled.
+    provider.on("speechStarted", () => {
+      if (this.provider !== provider) return;
+      this.transcriptBuffer = "";
+      this.send({ type: "input_audio_buffer.speech_started" });
+    });
+    provider.on("speechStopped", () => {
+      if (this.provider !== provider) return;
+      this.send({ type: "input_audio_buffer.speech_stopped" });
+    });
+    provider.on("transcriptDelta", (delta) => {
+      if (this.provider !== provider) return;
+      this.transcriptBuffer += delta;
+      this.send({ type: "transcript.partial", text: this.transcriptBuffer, emotion: "unknown" });
+    });
+    provider.on("transcriptFinal", (text) => {
+      if (this.provider !== provider) return;
+      this.transcriptBuffer = text;
+      this.send({ type: "transcript.final", text, emotion: "unknown" });
+    });
+    provider.on("responseCreated", (responseId) => {
+      if (this.provider !== provider) return;
+      this.activeResponseId = responseId;
+      this.responseText.set(responseId, "");
+      this.send({ type: "response.created", responseId });
+    });
+    provider.on("textDelta", (responseId, delta) => {
+      if (this.provider !== provider) return;
+      const previous = this.responseText.get(responseId) ?? "";
+      this.responseText.set(responseId, previous + delta);
+      this.send({ type: "response.text.delta", responseId, delta });
+    });
+    provider.on("audio", (responseId, audio) => {
+      if (this.provider !== provider) return;
+      if (!this.audioStarted.has(responseId)) {
+        this.audioStarted.add(responseId);
+        this.send({ type: "response.audio.started", responseId, format: OUTPUT_AUDIO_FORMAT });
+      }
+      if (this.client.readyState === WebSocket.OPEN) this.client.send(audio, { binary: true });
+    });
+    provider.on("audioDone", (responseId) => {
+      if (this.provider !== provider) return;
+      this.send({ type: "response.audio.done", responseId });
+    });
+    provider.on("interrupted", (responseId, reason) => {
+      if (this.provider !== provider) return;
+      this.send({ type: "response.interrupted", responseId, reason: reason === "barge_in" ? "barge_in" : "client_cancel" });
+      if (this.activeResponseId === responseId) this.activeResponseId = undefined;
+    });
+    provider.on("responseDone", (responseId, text, _status) => {
+      if (this.provider !== provider) return;
+      this.send({ type: "response.done", responseId, text });
+      this.responseText.delete(responseId);
+      this.audioStarted.delete(responseId);
+      if (this.activeResponseId === responseId) this.activeResponseId = undefined;
+    });
+    provider.on("error", (error) => {
+      if (this.provider !== provider) return;
+      this.telemetry?.event("omni.error", { message: error.message }, "error", "omni");
+      // Startup errors are handled by startGatewaySession so Auto can fall back.
+      // Runtime errors may be non-fatal; surface them while keeping recovery tied
+      // to an actual upstream close event.
+      if (this.providerReady) this.sendError("OMNI_REALTIME_ERROR", error.message, true);
+    });
+    provider.on("close", (code, reason) => {
+      if (this.closed || this.provider !== provider) return;
+      const wasReady = this.providerReady;
+      this.providerReady = false;
+      this.provider = undefined;
+      this.telemetry?.event("omni.closed", { code, reason }, code === 1000 ? "info" : "warn", "omni");
+      if (wasReady) this.beginRecovery(code, reason);
+    });
+  }
+
+  private beginRecovery(code: number, reason: string): void {
+    if (this.closed || this.recoveryPromise) return;
+    this.interruptActiveResponseForRecovery();
+    const startedAt = Date.now();
+    this.telemetry?.event("omni.recovery.started", {
+      code,
+      reason,
+      maxAttempts: RECOVERY_DELAYS_MS.length,
+    }, "warn", "omni");
+    this.recoveryPromise = this.recoverProvider(startedAt).finally(() => {
+      this.recoveryPromise = undefined;
+    });
+    void this.recoveryPromise;
+  }
+
+  private async recoverProvider(startedAt: number): Promise<void> {
+    let lastError: unknown;
+    for (let index = 0; index < RECOVERY_DELAYS_MS.length; index += 1) {
+      const delayMs = RECOVERY_DELAYS_MS[index] ?? 0;
+      if (delayMs > 0) await delay(delayMs);
+      if (this.closed) return;
+      const attempt = index + 1;
+      try {
+        await this.openProvider();
+        const bufferedAudio = this.recoveryAudioBuffer;
+        this.recoveryAudioBuffer = Buffer.alloc(0);
+        if (bufferedAudio.length) this.provider?.appendAudio(bufferedAudio);
+        this.telemetry?.event("omni.recovered", {
+          attempt,
+          recoveryMs: Date.now() - startedAt,
+          bufferedAudioMs: Math.round(bufferedAudio.length / 32),
+          contextReset: true,
+        }, "info", "omni");
+        return;
+      } catch (error) {
+        lastError = error;
+        this.telemetry?.event("omni.recovery.attempt_failed", {
+          attempt,
+          message: error instanceof Error ? error.message : String(error),
+        }, "warn", "omni");
+      }
+    }
+
+    const message = lastError instanceof Error ? lastError.message : String(lastError ?? "unknown recovery error");
+    this.telemetry?.event("omni.recovery.exhausted", {
+      attempts: RECOVERY_DELAYS_MS.length,
+      message,
+    }, "error", "omni");
+    this.sendError("OMNI_REALTIME_RECOVERY_FAILED", `Native Live 自动恢复失败：${message}`, true);
+    queueMicrotask(() => {
+      if (this.client.readyState === WebSocket.OPEN || this.client.readyState === WebSocket.CONNECTING) {
+        this.client.close(1011, "omni recovery failed");
+      }
+    });
+  }
+
+  private interruptActiveResponseForRecovery(): void {
+    const responseId = this.activeResponseId;
+    if (!responseId) return;
+    this.send({ type: "response.interrupted", responseId, reason: "client_cancel" });
+    this.responseText.delete(responseId);
+    this.audioStarted.delete(responseId);
+    this.activeResponseId = undefined;
+    this.telemetry?.event("omni.recovery.interrupted_response", {}, "warn", "omni");
+  }
+
+  private bufferRecoveryAudio(audio: Buffer): void {
+    const combined = this.recoveryAudioBuffer.length
+      ? Buffer.concat([this.recoveryAudioBuffer, audio])
+      : Buffer.from(audio);
+    this.recoveryAudioBuffer = combined.length <= RECOVERY_AUDIO_BUFFER_MAX_BYTES
+      ? combined
+      : combined.subarray(combined.length - RECOVERY_AUDIO_BUFFER_MAX_BYTES);
   }
 
   private buildInstructions(): string {
@@ -256,4 +362,8 @@ export class QwenOmniLiveSession {
   private sendError(code: string, message: string, retryable: boolean): void {
     this.send({ type: "error", code, message, retryable });
   }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
