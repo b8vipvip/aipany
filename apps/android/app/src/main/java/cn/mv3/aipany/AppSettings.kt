@@ -3,7 +3,8 @@ package cn.mv3.aipany
 import android.content.Context
 
 data class AppSettings(
-    val voiceId: String = "Cherry",
+    val experienceMode: String = "native_plus",
+    val voiceId: String = "longanqian",
     val interactionMode: String = "auto",
     val socialProactivity: Float = 0.45f,
     val assistantAliases: String = "Aipany,小派",
@@ -25,7 +26,8 @@ data class AppSettings(
         fun load(context: Context): AppSettings {
             val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             return AppSettings(
-                voiceId = prefs.getString("voice_id", "Cherry") ?: "Cherry",
+                experienceMode = prefs.getString("experience_mode", "native_plus") ?: "native_plus",
+                voiceId = prefs.getString("voice_id", "longanqian") ?: "longanqian",
                 interactionMode = prefs.getString("interaction_mode", "auto") ?: "auto",
                 socialProactivity = prefs.getFloat("social_proactivity", 0.45f).coerceIn(0f, 1f),
                 assistantAliases = prefs.getString("assistant_aliases", "Aipany,小派") ?: "Aipany,小派",
@@ -37,6 +39,7 @@ data class AppSettings(
 
         fun save(context: Context, value: AppSettings) {
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .putString("experience_mode", value.experienceMode)
                 .putString("voice_id", value.voiceId)
                 .putString("interaction_mode", value.interactionMode)
                 .putFloat("social_proactivity", value.socialProactivity)
