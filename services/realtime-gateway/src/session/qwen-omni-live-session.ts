@@ -76,13 +76,14 @@ export class QwenOmniLiveSession {
     });
     this.provider = provider;
 
+    // Forwarded client-protocol events are observed once by server.ts through
+    // instrumentOutgoingWebSocket(). Do not record the same semantic event here,
+    // otherwise Native Live turns, interruptions and latency samples are doubled.
     provider.on("speechStarted", () => {
       this.transcriptBuffer = "";
-      this.telemetry?.event("speech.started", {}, "info", "audio");
       this.send({ type: "input_audio_buffer.speech_started" });
     });
     provider.on("speechStopped", () => {
-      this.telemetry?.event("speech.stopped", {}, "info", "audio");
       this.send({ type: "input_audio_buffer.speech_stopped" });
     });
     provider.on("transcriptDelta", (delta) => {
@@ -91,25 +92,21 @@ export class QwenOmniLiveSession {
     });
     provider.on("transcriptFinal", (text) => {
       this.transcriptBuffer = text;
-      this.telemetry?.event("transcript.final", { textChars: text.length }, "info", "asr");
       this.send({ type: "transcript.final", text, emotion: "unknown" });
     });
     provider.on("responseCreated", (responseId) => {
       this.activeResponseId = responseId;
       this.responseText.set(responseId, "");
-      this.telemetry?.event("response.created", { responseId }, "info", "omni");
       this.send({ type: "response.created", responseId });
     });
     provider.on("textDelta", (responseId, delta) => {
       const previous = this.responseText.get(responseId) ?? "";
-      if (!previous) this.telemetry?.event("response.first_text", { responseId }, "info", "omni");
       this.responseText.set(responseId, previous + delta);
       this.send({ type: "response.text.delta", responseId, delta });
     });
     provider.on("audio", (responseId, audio) => {
       if (!this.audioStarted.has(responseId)) {
         this.audioStarted.add(responseId);
-        this.telemetry?.event("response.first_audio", { responseId, bytes: audio.length }, "info", "omni");
         this.send({ type: "response.audio.started", responseId, format: OUTPUT_AUDIO_FORMAT });
       }
       if (this.client.readyState === WebSocket.OPEN) this.client.send(audio, { binary: true });
@@ -118,12 +115,10 @@ export class QwenOmniLiveSession {
       this.send({ type: "response.audio.done", responseId });
     });
     provider.on("interrupted", (responseId, reason) => {
-      this.telemetry?.event("response.interrupted", { responseId, reason }, "info", "omni");
       this.send({ type: "response.interrupted", responseId, reason: reason === "barge_in" ? "barge_in" : "client_cancel" });
       if (this.activeResponseId === responseId) this.activeResponseId = undefined;
     });
-    provider.on("responseDone", (responseId, text, status) => {
-      this.telemetry?.event("response.done", { responseId, status: status || "", textChars: text.length }, "info", "omni");
+    provider.on("responseDone", (responseId, text, _status) => {
       this.send({ type: "response.done", responseId, text });
       this.responseText.delete(responseId);
       this.audioStarted.delete(responseId);
@@ -162,7 +157,7 @@ export class QwenOmniLiveSession {
     });
     this.sendModeState();
     this.send({ type: "speaker.consent.updated", granted: false });
-    this.telemetry?.event("session.ready", { upstream: "qwen-omni-realtime", voice }, "info", "session");
+    this.telemetry?.event("omni.session.ready", { upstream: "qwen-omni-realtime", voice }, "info", "omni");
     this.send({ type: "session.ready", sessionId: this.id });
   }
 
