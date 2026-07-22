@@ -2,17 +2,22 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { ADMIN_CONFIG_PAGE } from "./admin-config-page.js";
 import { ADMIN_FAILOVER_UI } from "./admin-failover-ui.js";
 import { ADMIN_OBSERVABILITY_UI } from "./admin-observability-ui.js";
+import { ADMIN_OPERATIONS_UI } from "./admin-operations-ui.js";
 import { decryptConfigBackup, encryptConfigBackup } from "./config-backup.js";
 import { runAdminE2eTest } from "./e2e-test-runner.js";
 import { benchmarkRelayProvider } from "./relay-model-tester.js";
 import { RuntimeApiConfigStore } from "./runtime-api-config-store.js";
+import { GitHubObservabilitySync } from "../observability/github-observability-sync.js";
 import type { RealtimeObservabilityStore } from "../observability/realtime-observability.js";
+import { OperationsControlStore } from "../operations/operations-control-store.js";
 import {
   getLlmRoutingSnapshot,
   llmProtocolSchema,
   resetLlmRoutingState,
   testLlmRoute,
 } from "../providers/llm-provider-pool.js";
+
+const operationsControlStore = new OperationsControlStore();
 
 export async function handleAdminConfigHttp(
   request: IncomingMessage,
@@ -21,6 +26,7 @@ export async function handleAdminConfigHttp(
   observability?: RealtimeObservabilityStore,
 ): Promise<boolean> {
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+  await operationsControlStore.load();
 
   if (request.method === "GET" && (url.pathname === "/admin" || url.pathname === "/admin/")) {
     response.writeHead(302, { Location: "/admin/config/quality", "Cache-Control": "no-store" });
@@ -48,6 +54,16 @@ export async function handleAdminConfigHttp(
     return true;
   }
 
+  if (request.method === "GET" && url.pathname === "/admin/operations-ui.js") {
+    response.writeHead(200, {
+      "Content-Type": "application/javascript; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+    });
+    response.end(ADMIN_OPERATIONS_UI);
+    return true;
+  }
+
   if (request.method === "GET" && (url.pathname === "/admin/config" || url.pathname.startsWith("/admin/config/"))) {
     response.writeHead(200, {
       "Content-Type": "text/html; charset=utf-8",
@@ -57,27 +73,84 @@ export async function handleAdminConfigHttp(
     });
     response.end(ADMIN_CONFIG_PAGE.replace(
       "</body>",
-      '<script src="/admin/failover-ui.js"></script><script src="/admin/observability-ui.js"></script></body>',
+      '<script src="/admin/failover-ui.js"></script><script src="/admin/observability-ui.js"></script><script src="/admin/operations-ui.js"></script></body>',
     ));
     return true;
   }
 
   const isConfigApi = url.pathname.startsWith("/admin/api/config");
   const isObservabilityApi = url.pathname.startsWith("/admin/api/observability");
-  if (!isConfigApi && !isObservabilityApi) return false;
+  const isOperationsApi = url.pathname.startsWith("/admin/api/operations");
+  if (!isConfigApi && !isObservabilityApi && !isOperationsApi) return false;
   response.setHeader("Cache-Control", "no-store");
   response.setHeader("Content-Type", "application/json; charset=utf-8");
 
-  if (!store.enabled) {
-    response.writeHead(503);
-    response.end(JSON.stringify({ error: "admin_config_disabled", message: "请先在 .env 配置 AIPANY_ADMIN_TOKEN" }));
+  if (request.method === "GET" && url.pathname === "/admin/api/operations/auth-status") {
+    const snapshot = await operationsControlStore.snapshot();
+    response.writeHead(200);
+    response.end(JSON.stringify(snapshot.adminAccess));
     return true;
   }
 
   const token = readBearerToken(request.headers.authorization);
-  if (!store.authenticate(token)) {
+  const passwordEnabled = await operationsControlStore.isPasswordEnabled();
+  const authorized = !passwordEnabled
+    || store.authenticate(token)
+    || await operationsControlStore.verifyPassword(token);
+  if (!authorized) {
     response.writeHead(401, { "WWW-Authenticate": "Bearer" });
     response.end(JSON.stringify({ error: "unauthorized" }));
+    return true;
+  }
+
+  if (isOperationsApi) {
+    if (request.method === "GET" && url.pathname === "/admin/api/operations") {
+      response.writeHead(200);
+      response.end(JSON.stringify(await operationsControlStore.snapshot()));
+      return true;
+    }
+
+    if (request.method === "PUT" && url.pathname === "/admin/api/operations/admin-access") {
+      try {
+        const payload = await readJsonBody(request, 64 * 1024);
+        const result = await operationsControlStore.updateAdminAccess(payload);
+        response.writeHead(200);
+        response.end(JSON.stringify(result));
+      } catch (error) {
+        response.writeHead(400);
+        response.end(JSON.stringify({ error: "admin_access_update_failed", message: formatError(error) }));
+      }
+      return true;
+    }
+
+    if (request.method === "PUT" && url.pathname === "/admin/api/operations/github-sync") {
+      try {
+        const payload = await readJsonBody(request, 64 * 1024);
+        const result = await operationsControlStore.updateObservabilityGitHub(payload);
+        response.writeHead(200);
+        response.end(JSON.stringify(result));
+      } catch (error) {
+        response.writeHead(400);
+        response.end(JSON.stringify({ error: "github_sync_update_failed", message: formatError(error) }));
+      }
+      return true;
+    }
+
+    if (request.method === "POST" && url.pathname === "/admin/api/operations/github-sync/test") {
+      try {
+        const sync = new GitHubObservabilitySync();
+        const result = await sync.testConnection(await operationsControlStore.getObservabilityGitHubConfig());
+        response.writeHead(200);
+        response.end(JSON.stringify(result));
+      } catch (error) {
+        response.writeHead(502);
+        response.end(JSON.stringify({ error: "github_sync_test_failed", message: formatError(error) }));
+      }
+      return true;
+    }
+
+    response.writeHead(405, { Allow: "GET, PUT, POST" });
+    response.end(JSON.stringify({ error: "method_not_allowed" }));
     return true;
   }
 
@@ -194,7 +267,10 @@ export async function handleAdminConfigHttp(
       const payload = await readJsonBody(request, 64 * 1024);
       const providerIds = requireStringArray(payload.providerIds, "providerIds");
       const pool = store.getLlmProviderPool();
-      const providers = pool.providers.map((provider) => ({ ...provider, models: provider.models.map((model) => ({ ...model, protocols: [...model.protocols] })) }));
+      const providers = pool.providers.map((provider) => ({
+        ...provider,
+        models: provider.models.map((model) => ({ ...model, protocols: [...model.protocols] })),
+      }));
       const results: Array<Record<string, unknown>> = [];
 
       for (const providerId of providerIds) {
@@ -311,7 +387,9 @@ function requireString(value: unknown, name: string): string {
 
 function requireStringArray(value: unknown, name: string): string[] {
   if (!Array.isArray(value)) throw new Error(`${name} 必须是数组`);
-  const output = value.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim());
+  const output = value
+    .filter((item): item is string => typeof item === "string" && Boolean(item.trim()))
+    .map((item) => item.trim());
   if (!output.length) throw new Error(`请至少选择一个${name === "providerIds" ? "中转站" : name}`);
   return [...new Set(output)];
 }

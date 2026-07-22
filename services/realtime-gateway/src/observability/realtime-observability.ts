@@ -1,6 +1,7 @@
-import { randomUUID, createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile, readdir, rename, stat, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { GitHubObservabilitySync } from "./github-observability-sync.js";
 
 export type RealtimeEngine = "cascaded" | "omni_realtime";
 export type ObservabilityLevel = "info" | "warn" | "error";
@@ -203,15 +204,23 @@ export class RealtimeObservabilityStore {
   private readonly sessions = new Map<string, SessionReport>();
   private readonly activeSessions = new Map<string, SessionReport>();
   private readonly lastDeviceSession = new Map<string, number>();
+  private readonly githubSync: GitHubObservabilitySync;
   private writeQueue: Promise<void> = Promise.resolve();
   private approximateBytes = 0;
   private startedAt = Date.now();
 
-  constructor(options: { filePath?: string; maxEvents?: number; maxSessions?: number; maxFileBytes?: number } = {}) {
+  constructor(options: {
+    filePath?: string;
+    maxEvents?: number;
+    maxSessions?: number;
+    maxFileBytes?: number;
+    githubSync?: GitHubObservabilitySync;
+  } = {}) {
     this.filePath = options.filePath?.trim() || process.env.AIPANY_OBSERVABILITY_PATH?.trim() || "/data/observability/events.jsonl";
     this.maxEvents = options.maxEvents ?? 5000;
     this.maxSessions = options.maxSessions ?? 1000;
     this.maxFileBytes = options.maxFileBytes ?? 20 * 1024 * 1024;
+    this.githubSync = options.githubSync ?? new GitHubObservabilitySync();
   }
 
   async load(): Promise<void> {
@@ -297,6 +306,7 @@ export class RealtimeObservabilityStore {
       timestamp: input.timestamp ?? Date.now(),
     };
     this.events.push(event);
+    this.githubSync.enqueue(event);
     if (this.events.length > this.maxEvents) this.events.splice(0, this.events.length - this.maxEvents);
     const line = `${JSON.stringify(event)}\n`;
     this.approximateBytes += Buffer.byteLength(line);
