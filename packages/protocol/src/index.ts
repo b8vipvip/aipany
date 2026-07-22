@@ -3,6 +3,9 @@ import { z } from "zod";
 export const interactionModeSchema = z.enum(["auto", "owner_focus", "group"]);
 export type InteractionMode = z.infer<typeof interactionModeSchema>;
 
+export const experienceModeSchema = z.enum(["economy_live", "native_flash", "native_plus"]);
+export type ExperienceMode = z.infer<typeof experienceModeSchema>;
+
 export const inputAudioSchema = z.object({
   encoding: z.literal("pcm_s16le").default("pcm_s16le"),
   sampleRate: z.literal(16000).default(16000),
@@ -28,9 +31,10 @@ export const sessionStartEventSchema = z.object({
     locale: z.string().default("zh-CN"),
     assistantAliases: z.array(z.string().min(1)).max(12).default(["Aipany"]),
     systemPrompt: z.string().optional(),
+    experienceMode: experienceModeSchema.optional(),
     interactionMode: interactionModeSchema.default("auto"),
     socialProactivity: z.number().min(0).max(1).default(0.45),
-    outputVoice: z.string().trim().min(1).max(80).optional(),
+    outputVoice: z.string().trim().min(1).max(120).optional(),
     inputAudio: inputAudioSchema.default({ encoding: "pcm_s16le", sampleRate: 16000, channels: 1 }),
     device: deviceSchema,
   }),
