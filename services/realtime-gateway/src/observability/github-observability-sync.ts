@@ -14,7 +14,7 @@ export interface SyncableObservabilityEvent {
   data?: Record<string, unknown>;
 }
 
-interface SanitizedObservabilityEvent {
+export interface SanitizedObservabilityEvent {
   timestamp: number;
   level: string;
   category: string;
@@ -45,7 +45,15 @@ const SAFE_STRING_KEYS = new Set([
   "fallbackReason",
 ]);
 
-const SENSITIVE_KEY = /(transcript|text|content|prompt|answer|response|audio|authorization|api.?key|token|secret|password|tenant|user.?id|device.?id|remote.?address|user.?agent|cookie)/i;
+const DIRECT_IDENTIFIER_KEYS = new Set([
+  "tenantid",
+  "userid",
+  "deviceid",
+  "deviceidhash",
+  "remoteaddress",
+  "ipaddress",
+  "useragent",
+]);
 
 export class GitHubObservabilitySync {
   private readonly configPath?: string;
@@ -67,9 +75,13 @@ export class GitHubObservabilitySync {
     this.buffer.push(sanitizeEvent(event));
     if (this.buffer.length > 2000) this.buffer.splice(0, this.buffer.length - 2000);
     if (!this.timer && !this.scheduling) {
-      this.scheduling = this.scheduleFromCurrentConfig().finally(() => {
-        this.scheduling = undefined;
-      });
+      this.scheduling = this.scheduleFromCurrentConfig()
+        .catch(() => {
+          this.buffer.length = 0;
+        })
+        .finally(() => {
+          this.scheduling = undefined;
+        });
     }
   }
 
@@ -95,12 +107,19 @@ export class GitHubObservabilitySync {
     const config = await readObservabilityGitHubSyncConfig(this.configPath);
     if (!config.enabled) {
       this.buffer.length = 0;
+      this.timer = setTimeout(() => {
+        this.timer = undefined;
+        this.buffer.length = 0;
+      }, 30_000);
+      this.timer.unref?.();
       return;
     }
     if (this.timer) return;
     this.timer = setTimeout(() => {
       this.timer = undefined;
-      void this.flushNow();
+      void this.flushNow().catch(() => {
+        void this.scheduleFromCurrentConfig().catch(() => undefined);
+      });
     }, config.batchSeconds * 1000);
     this.timer.unref?.();
   }
@@ -206,7 +225,9 @@ function sanitizeRecord(input: Record<string, unknown>, depth = 0): Record<strin
   if (depth > 3) return {};
   const output: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(input)) {
-    if (SENSITIVE_KEY.test(key)) continue;
+    const normalizedKey = normalizeKey(key);
+    if (DIRECT_IDENTIFIER_KEYS.has(normalizedKey)) continue;
+
     if (value === null || typeof value === "boolean") {
       output[key] = value;
       continue;
@@ -215,6 +236,8 @@ function sanitizeRecord(input: Record<string, unknown>, depth = 0): Record<strin
       output[key] = value;
       continue;
     }
+    if (isSensitivePayloadKey(normalizedKey)) continue;
+
     if (typeof value === "string") {
       if (SAFE_STRING_KEYS.has(key)) output[key] = redactSecrets(truncate(value, 300));
       continue;
@@ -235,6 +258,17 @@ function sanitizeRecord(input: Record<string, unknown>, depth = 0): Record<strin
     }
   }
   return output;
+}
+
+function isSensitivePayloadKey(normalizedKey: string): boolean {
+  if (["text", "transcript", "content", "prompt", "answer", "pcm", "cookie", "authorization"].includes(normalizedKey)) return true;
+  if (normalizedKey.endsWith("text") || normalizedKey.endsWith("transcript") || normalizedKey.endsWith("content") || normalizedKey.endsWith("prompt")) return true;
+  if (normalizedKey.includes("apikey") || normalizedKey.includes("token") || normalizedKey.includes("secret") || normalizedKey.includes("password")) return true;
+  return ["audiodata", "audiobase64", "audiopayload", "rawaudio"].includes(normalizedKey);
+}
+
+function normalizeKey(value: string): string {
+  return value.replace(/[^a-z0-9]/gi, "").toLowerCase();
 }
 
 function redactSecrets(value: string): string {
