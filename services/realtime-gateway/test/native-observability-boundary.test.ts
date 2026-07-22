@@ -18,14 +18,15 @@ test("Native Live forwarded protocol events are measured only at the gateway web
 
   for (const event of FORWARDED_METRIC_EVENTS) {
     assert.equal(
-      source.includes(`telemetry?.event("${event}"`),
+      source.includes(`telemetry?.event("${event}"`) || source.includes(`observe("${event}"`),
       false,
       `${event} must be recorded by instrumentOutgoingWebSocket instead of QwenOmniLiveSession`,
     );
   }
 
-  assert.match(source, /telemetry\?\.event\("omni\.error"/);
-  assert.match(source, /telemetry\?\.event\("omni\.closed"/);
-  assert.match(source, /telemetry\?\.event\("omni\.session\.ready"/);
+  assert.match(source, /observe\("omni\.error"/);
+  assert.match(source, /observe\("omni\.closed"/);
+  assert.match(source, /observe\("omni\.session\.ready"/);
+  assert.match(source, /recordGlobalRealtimeEvent/);
   assert.match(source, /instrumentOutgoingWebSocket/);
 });

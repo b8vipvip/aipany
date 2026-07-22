@@ -1,5 +1,6 @@
 import { RuntimeApiConfigStore } from "./admin/runtime-api-config-store.js";
 import { loadConfig } from "./config.js";
+import { setGlobalRealtimeObservabilityStore } from "./observability/global-observability.js";
 import { getNativeLiveCapabilityDiagnostic } from "./observability/native-live-diagnostics.js";
 import { RealtimeObservabilityStore } from "./observability/realtime-observability.js";
 import { createGatewayServer } from "./server.js";
@@ -13,6 +14,7 @@ await runtimeApiConfigStore.loadAndApply();
 const config = loadConfig();
 const observability = new RealtimeObservabilityStore({ filePath: config.observability.filePath });
 await observability.load();
+setGlobalRealtimeObservabilityStore(observability);
 
 let lastNativeLiveCapabilitySignature = "";
 function recordNativeLiveCapability(reason: "startup" | "config_changed"): void {
@@ -58,6 +60,7 @@ server.listen(config.server.port, config.server.host, () => {
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     clearInterval(nativeLiveCapabilityTimer);
+    setGlobalRealtimeObservabilityStore(undefined);
     server.close(() => process.exit(0));
   });
 }
