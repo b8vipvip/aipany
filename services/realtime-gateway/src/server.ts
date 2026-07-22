@@ -14,10 +14,17 @@ import {
 } from "@aipany/protocol";
 import { handleAdminConfigHttp } from "./admin/admin-config-http.js";
 import { RuntimeApiConfigStore } from "./admin/runtime-api-config-store.js";
-import { authenticateRequest, type AuthContext } from "./auth.js";
+import { authenticateRequest, requireScope, type AuthContext } from "./auth.js";
 import { loadConfig, type AppConfig } from "./config.js";
-import { getClientVoiceOptions } from "./mobile/client-capabilities.js";
+import {
+  defaultVoiceForModel,
+  getClientExperienceModeOptions,
+  getClientNativeModelOptions,
+  getClientVoiceOptions,
+} from "./mobile/client-capabilities.js";
 import { createMobilePreviewIdentity, issueMobilePreviewJwt } from "./mobile/mobile-preview.js";
+import { NativeVoicePreviewService } from "./mobile/native-voice-preview.js";
+import { resolveExperienceDefinition } from "./mobile/realtime-experience.js";
 import {
   RealtimeObservabilityStore,
   type RealtimeEngine,
@@ -55,6 +62,8 @@ export function createGatewayServer(
   const identityStore = createSpeakerIdentityStore(config);
   const authContexts = new WeakMap<IncomingMessage, AuthContext>();
   const mobilePreviewRequests = new Map<string, number[]>();
+  const voicePreviewRequests = new Map<string, number[]>();
+  const voicePreviewService = new NativeVoicePreviewService();
   const httpServer = createServer(async (request, response) => {
     try {
       if (await handleAdminConfigHttp(request, response, runtimeApiConfigStore, observability)) return;
@@ -70,6 +79,7 @@ export function createGatewayServer(
           realtimeEngine: selectedEngine,
           nativeLiveAvailable: isNativeLiveAvailable(runtimeConfig),
           defaults: {
+            experienceMode: "native_plus",
             outputVoice: selectedEngine === "omni_realtime"
               ? runtimeConfig.qwenOmniRealtime.voice
               : runtimeConfig.qwen.ttsVoice,
@@ -81,6 +91,8 @@ export function createGatewayServer(
             selectedEngine === "omni_realtime" ? runtimeConfig.qwenOmniRealtime.model : runtimeConfig.qwen.ttsModel,
             selectedEngine === "omni_realtime" ? runtimeConfig.qwenOmniRealtime.voice : runtimeConfig.qwen.ttsVoice,
           ),
+          experienceModes: getClientExperienceModeOptions(runtimeConfig),
+          nativeModels: getClientNativeModelOptions(),
           interactionModes: ["auto", "owner_focus", "group"],
           features: {
             localEndpointCommit: selectedEngine === "cascaded",
@@ -88,6 +100,8 @@ export function createGatewayServer(
             bargeIn: true,
             realtimeTranscript: true,
             perSessionVoice: true,
+            perSessionExperienceMode: true,
+            nativeVoicePreview: true,
             socialProactivity: true,
             automaticReconnect: true,
             clientTelemetry: true,
@@ -109,7 +123,7 @@ export function createGatewayServer(
           respondJson(response, 503, { error: "mobile_preview_requires_jwt" });
           return;
         }
-        if (!allowMobilePreviewRequest(request, mobilePreviewRequests)) {
+        if (!allowRateLimitedRequest(request, mobilePreviewRequests, 30)) {
           observability.record({ level: "warn", category: "auth", event: "mobile.bootstrap.rate_limited" });
           respondJson(response, 429, { error: "rate_limited" });
           return;
@@ -135,6 +149,61 @@ export function createGatewayServer(
           userId: identity.userId,
           websocketPath: "/v1/realtime",
         });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/v1/mobile/voice-preview") {
+        const runtimeConfig = loadConfig();
+        const authContext = authenticateRequest(request, url, runtimeConfig.server.auth);
+        if (!authContext) {
+          respondJson(response, 401, { error: "unauthorized" });
+          return;
+        }
+        try {
+          requireScope(authContext, "realtime");
+        } catch (error) {
+          respondJson(response, 403, { error: "forbidden", message: formatError(error) });
+          return;
+        }
+        if (!allowRateLimitedRequest(request, voicePreviewRequests, 24)) {
+          respondJson(response, 429, { error: "voice_preview_rate_limited" });
+          return;
+        }
+        const body = await readJsonBody(request);
+        const model = typeof body.model === "string" ? body.model.trim() : "";
+        const voice = typeof body.voice === "string" ? body.voice.trim() : "";
+        try {
+          const startedAt = Date.now();
+          const audio = await voicePreviewService.render({
+            apiKey: runtimeConfig.qwenOmniRealtime.apiKey,
+            workspaceId: runtimeConfig.qwenOmniRealtime.workspaceId,
+            baseUrl: runtimeConfig.qwenOmniRealtime.baseUrl,
+            model,
+            voice,
+          });
+          observability.record({
+            level: "info",
+            category: "mobile",
+            event: "voice_preview.generated",
+            data: { model, voice, bytes: audio.length, durationMs: Date.now() - startedAt },
+          });
+          response.writeHead(200, {
+            "Content-Type": "application/octet-stream",
+            "Cache-Control": "private, max-age=1800",
+            "X-Aipany-Audio-Encoding": "pcm_s16le",
+            "X-Aipany-Audio-Sample-Rate": "24000",
+            "X-Aipany-Audio-Channels": "1",
+          });
+          response.end(audio);
+        } catch (error) {
+          observability.record({
+            level: "warn",
+            category: "mobile",
+            event: "voice_preview.failed",
+            data: { model, voice, message: formatError(error) },
+          });
+          respondJson(response, 400, { error: "voice_preview_failed", message: formatError(error) });
+        }
         return;
       }
 
@@ -271,7 +340,15 @@ export function createGatewayServer(
             ws.close(1011, "runtime config invalid");
             return;
           }
-          const initialEngine = resolveRealtimeEngine(sessionConfig);
+
+          const experience = resolveExperienceDefinition(sessionConfig, event.session.experienceMode);
+          const nativeAvailable = isNativeLiveAvailable(sessionConfig);
+          const requestedEngine = experience?.engine ?? resolveRealtimeEngine(sessionConfig);
+          const initialEngine = requestedEngine === "omni_realtime" && !nativeAvailable ? "cascaded" : requestedEngine;
+          const nativeModel = initialEngine === "omni_realtime" ? experience?.model : undefined;
+          const nativeTurnDetection = initialEngine === "omni_realtime" ? experience?.recommendedTurnDetection : undefined;
+          const allowFallback = Boolean(experience) || sessionConfig.server.realtimeEngine === "auto";
+
           telemetry = observability.beginSession({
             sessionId: connectionId,
             connectionId,
@@ -287,8 +364,11 @@ export function createGatewayServer(
           });
           telemetry.event("engine.selected", {
             requested: sessionConfig.server.realtimeEngine,
+            requestedExperience: event.session.experienceMode ?? "legacy_default",
             selected: initialEngine,
-            nativeLiveAvailable: isNativeLiveAvailable(sessionConfig),
+            selectedModel: nativeModel ?? (initialEngine === "cascaded" ? sessionConfig.qwen.ttsModel : sessionConfig.qwenOmniRealtime.model),
+            nativeLiveAvailable: nativeAvailable,
+            fallbackBeforeStart: requestedEngine !== initialEngine,
           }, "info", "engine");
 
           void startGatewaySession({
@@ -298,6 +378,9 @@ export function createGatewayServer(
             identityStore,
             authContext,
             initialEngine,
+            nativeModel,
+            nativeTurnDetection,
+            allowFallback,
             telemetry,
           }).then((started) => {
             session = started.session;
@@ -429,19 +512,33 @@ async function startGatewaySession(input: {
   identityStore: SpeakerIdentityStore;
   authContext: AuthContext;
   initialEngine: RealtimeEngine;
+  nativeModel?: string;
+  nativeTurnDetection?: "server_vad" | "smart_turn" | "semantic_vad";
+  allowFallback: boolean;
   telemetry: SessionObservability;
 }): Promise<{ session: GatewaySession; engine: RealtimeEngine }> {
   if (input.initialEngine === "omni_realtime") {
-    const live = new QwenOmniLiveSession(input.ws, input.config, input.authContext);
+    const model = input.nativeModel ?? input.config.qwenOmniRealtime.model;
+    const nativeConfig = {
+      ...input.config,
+      qwenOmniRealtime: {
+        ...input.config.qwenOmniRealtime,
+        model,
+        voice: defaultVoiceForModel(model),
+        turnDetection: input.nativeTurnDetection ?? input.config.qwenOmniRealtime.turnDetection,
+      },
+    } as AppConfig;
+    const live = new QwenOmniLiveSession(input.ws, nativeConfig, input.authContext, input.telemetry);
     try {
       await live.start(input.event);
       return { session: live, engine: "omni_realtime" };
     } catch (error) {
       live.close();
-      if (input.config.server.realtimeEngine !== "auto") throw error;
+      if (!input.allowFallback) throw error;
       input.telemetry.event("engine.fallback", {
         from: "omni_realtime",
         to: "cascaded",
+        model,
         reason: formatError(error),
       }, "warn", "engine");
     }
@@ -566,7 +663,7 @@ async function readJsonBody(request: IncomingMessage): Promise<Record<string, un
   return parsed as Record<string, unknown>;
 }
 
-function allowMobilePreviewRequest(request: IncomingMessage, state: Map<string, number[]>): boolean {
+function allowRateLimitedRequest(request: IncomingMessage, state: Map<string, number[]>, limit: number): boolean {
   const forwarded = request.headers["x-forwarded-for"];
   const ip = (typeof forwarded === "string" ? forwarded.split(",")[0]?.trim() : undefined)
     ?? request.socket.remoteAddress
@@ -574,7 +671,7 @@ function allowMobilePreviewRequest(request: IncomingMessage, state: Map<string, 
   const now = Date.now();
   const cutoff = now - 60 * 60 * 1000;
   const recent = (state.get(ip) ?? []).filter((timestamp) => timestamp >= cutoff);
-  if (recent.length >= 30) {
+  if (recent.length >= limit) {
     state.set(ip, recent);
     return false;
   }
