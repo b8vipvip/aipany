@@ -10,7 +10,8 @@ import {
 import { assertSessionIdentity, requireScope, type AuthContext } from "../auth.js";
 import type { AppConfig } from "../config.js";
 import { resolveRequestedVoice } from "../mobile/client-capabilities.js";
-import type { SessionObservability } from "../observability/realtime-observability.js";
+import { recordGlobalRealtimeEvent } from "../observability/global-observability.js";
+import type { ObservabilityLevel, SessionObservability } from "../observability/realtime-observability.js";
 import {
   QwenOmniRealtimeClient,
   type QwenOmniRealtimeConfig,
@@ -84,7 +85,7 @@ export class QwenOmniLiveSession {
     });
     this.sendModeState();
     this.send({ type: "speaker.consent.updated", granted: false });
-    this.telemetry?.event("omni.session.ready", { upstream: "qwen-omni-realtime", voice: this.voice }, "info", "omni");
+    this.observe("omni.session.ready", { upstream: "qwen-omni-realtime", voice: this.voice }, "info", "omni");
     this.send({ type: "session.ready", sessionId: this.id });
   }
 
@@ -243,7 +244,7 @@ export class QwenOmniLiveSession {
     });
     provider.on("error", (error) => {
       if (this.provider !== provider) return;
-      this.telemetry?.event("omni.error", { message: error.message }, "error", "omni");
+      this.observe("omni.error", { message: error.message }, "error", "omni");
       // Startup errors are handled by startGatewaySession so Auto can fall back.
       // Runtime errors may be non-fatal; surface them while keeping recovery tied
       // to an actual upstream close event.
@@ -254,7 +255,7 @@ export class QwenOmniLiveSession {
       const wasReady = this.providerReady;
       this.providerReady = false;
       this.provider = undefined;
-      this.telemetry?.event("omni.closed", { code, reason }, code === 1000 ? "info" : "warn", "omni");
+      this.observe("omni.closed", { code, reason }, code === 1000 ? "info" : "warn", "omni");
       if (wasReady) this.beginRecovery(code, reason);
     });
   }
@@ -263,7 +264,7 @@ export class QwenOmniLiveSession {
     if (this.closed || this.recoveryPromise) return;
     this.interruptActiveResponseForRecovery();
     const startedAt = Date.now();
-    this.telemetry?.event("omni.recovery.started", {
+    this.observe("omni.recovery.started", {
       code,
       reason,
       maxAttempts: RECOVERY_DELAYS_MS.length,
@@ -286,7 +287,7 @@ export class QwenOmniLiveSession {
         const bufferedAudio = this.recoveryAudioBuffer;
         this.recoveryAudioBuffer = Buffer.alloc(0);
         if (bufferedAudio.length) this.provider?.appendAudio(bufferedAudio);
-        this.telemetry?.event("omni.recovered", {
+        this.observe("omni.recovered", {
           attempt,
           recoveryMs: Date.now() - startedAt,
           bufferedAudioMs: Math.round(bufferedAudio.length / 32),
@@ -295,7 +296,7 @@ export class QwenOmniLiveSession {
         return;
       } catch (error) {
         lastError = error;
-        this.telemetry?.event("omni.recovery.attempt_failed", {
+        this.observe("omni.recovery.attempt_failed", {
           attempt,
           message: error instanceof Error ? error.message : String(error),
         }, "warn", "omni");
@@ -303,7 +304,7 @@ export class QwenOmniLiveSession {
     }
 
     const message = lastError instanceof Error ? lastError.message : String(lastError ?? "unknown recovery error");
-    this.telemetry?.event("omni.recovery.exhausted", {
+    this.observe("omni.recovery.exhausted", {
       attempts: RECOVERY_DELAYS_MS.length,
       message,
     }, "error", "omni");
@@ -322,7 +323,7 @@ export class QwenOmniLiveSession {
     this.responseText.delete(responseId);
     this.audioStarted.delete(responseId);
     this.activeResponseId = undefined;
-    this.telemetry?.event("omni.recovery.interrupted_response", {}, "warn", "omni");
+    this.observe("omni.recovery.interrupted_response", {}, "warn", "omni");
   }
 
   private bufferRecoveryAudio(audio: Buffer): void {
@@ -332,6 +333,25 @@ export class QwenOmniLiveSession {
     this.recoveryAudioBuffer = combined.length <= RECOVERY_AUDIO_BUFFER_MAX_BYTES
       ? combined
       : combined.subarray(combined.length - RECOVERY_AUDIO_BUFFER_MAX_BYTES);
+  }
+
+  private observe(
+    event: string,
+    data: Record<string, unknown>,
+    level: ObservabilityLevel,
+    category: string,
+  ): void {
+    if (this.telemetry) {
+      this.telemetry.event(event, data, level, category);
+      return;
+    }
+    recordGlobalRealtimeEvent({
+      level,
+      category,
+      event,
+      engine: "omni_realtime",
+      data,
+    });
   }
 
   private buildInstructions(): string {
