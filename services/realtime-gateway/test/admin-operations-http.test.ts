@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
+import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createGatewayServer } from "../src/server.js";
 import { RuntimeApiConfigStore } from "../src/admin/runtime-api-config-store.js";
 import { loadConfig } from "../src/config.js";
 import { RealtimeObservabilityStore } from "../src/observability/realtime-observability.js";
 
-async function listen(server: ReturnType<typeof createGatewayServer>["httpServer"]): Promise<string> {
+async function listen(server: Server): Promise<string> {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   assert.ok(address && typeof address === "object");
@@ -26,11 +26,12 @@ test("operations auth status is public and admin APIs are directly accessible by
     else process.env.AIPANY_OPERATIONS_CONTROL_PATH = previousControlPath;
   });
 
+  const { createGatewayServer } = await import("../src/server.js");
   const runtimeStore = new RuntimeApiConfigStore({ filePath: join(directory, "runtime.json"), adminToken: "root-admin-token" });
   const observability = new RealtimeObservabilityStore({ filePath: join(directory, "events.jsonl") });
-  const gateway = createGatewayServer(loadConfig(), runtimeStore, observability);
-  t.after(() => gateway.httpServer.close());
-  const base = await listen(gateway.httpServer);
+  const server = createGatewayServer(loadConfig(), runtimeStore, observability);
+  t.after(() => server.close());
+  const base = await listen(server);
 
   const statusResponse = await fetch(`${base}/admin/api/operations/auth-status`);
   assert.equal(statusResponse.status, 200);
