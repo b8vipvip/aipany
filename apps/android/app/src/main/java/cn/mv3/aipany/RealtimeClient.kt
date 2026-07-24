@@ -56,6 +56,7 @@ class RealtimeClient(
     @Volatile private var firstAudioReceivedReported = false
 
     init {
+        ClientTelemetryBus.attach { name, valueMs -> sendTelemetry(name, valueMs) }
         scheduler.scheduleAtFixedRate({ heartbeatTick() }, 8, 8, TimeUnit.SECONDS)
     }
 
@@ -262,6 +263,7 @@ class RealtimeClient(
     }
 
     fun release() {
+        ClientTelemetryBus.detach()
         closeSilently(sendFinish = true, disableReconnect = true)
         scheduler.shutdownNow()
         httpClient.dispatcher.executorService.shutdown()
