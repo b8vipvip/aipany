@@ -22,8 +22,8 @@ class AudioEngine(
     private val onLocalSpeechStarted: () -> Unit,
     private val onEndpointDetected: () -> Unit,
     private val onLevel: (Float, Float, Boolean) -> Unit,
-    private val onPlaybackStarted: () -> Unit = {},
-    private val onPlaybackStopCompleted: (Double) -> Unit = {},
+    private val onPlaybackStarted: () -> Unit = { ClientTelemetryBus.report("playback_started") },
+    private val onPlaybackStopCompleted: (Double) -> Unit = { ClientTelemetryBus.report("playback_stop_completed", it) },
 ) {
     companion object {
         const val INPUT_SAMPLE_RATE = 16_000
