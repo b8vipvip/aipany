@@ -20,6 +20,8 @@ export interface QwenTtsPrewarmConfig {
   model: string;
 }
 
+export type QwenTtsProtocol = "qwen_realtime" | "dashscope_inference";
+
 interface QwenTtsEvents {
   audio: [Buffer];
   error: [Error];
@@ -33,18 +35,23 @@ interface TtsTransportEvents {
 }
 
 interface WarmEntry {
-  transport: TtsTransport;
+  transport: BaseTtsTransport;
   timer: ReturnType<typeof setTimeout>;
 }
 
 const PREWARM_TTL_MS = 20_000;
 const warmPool = new Map<string, WarmEntry>();
 
-/**
- * One upstream websocket. It can be opened before the final voice/prosody
- * instructions are known, then configured exactly once when the response starts.
- */
-class TtsTransport extends EventEmitter<TtsTransportEvents> {
+abstract class BaseTtsTransport extends EventEmitter<TtsTransportEvents> {
+  abstract open(): Promise<void>;
+  abstract configure(config: QwenTtsConfig, instructions: string): Promise<void>;
+  abstract appendText(text: string): void;
+  abstract finish(): Promise<void>;
+  abstract cancel(): void;
+}
+
+/** Existing Qwen3-TTS/Qwen-TTS Realtime session protocol. */
+class RealtimeSessionTtsTransport extends BaseTtsTransport {
   private ws?: WebSocket;
   private openPromise?: Promise<void>;
   private configurePromise?: Promise<void>;
@@ -57,6 +64,7 @@ class TtsTransport extends EventEmitter<TtsTransportEvents> {
   private configureReject?: (error: Error) => void;
   private finishPromise?: Promise<void>;
   private finishResolve?: () => void;
+  private finishedEmitted = false;
 
   constructor(private readonly connection: QwenTtsPrewarmConfig) {
     super();
@@ -68,14 +76,11 @@ class TtsTransport extends EventEmitter<TtsTransportEvents> {
     this.openPromise = new Promise<void>((resolve, reject) => {
       this.openResolve = resolve;
       this.openReject = reject;
-      const url = new URL(this.connection.baseUrl);
-      url.searchParams.set("model", this.connection.model);
-      const headers: Record<string, string> = {
-        Authorization: `Bearer ${this.connection.apiKey}`,
-        "user-agent": "aipany-realtime-gateway/0.6",
-      };
-      if (this.connection.workspaceId) headers["X-DashScope-WorkSpace"] = this.connection.workspaceId;
-      const ws = new WebSocket(url, { headers, perMessageDeflate: false });
+      const url = resolveTtsWebSocketUrl(this.connection.baseUrl, this.connection.model);
+      const ws = new WebSocket(url, {
+        headers: buildHeaders(this.connection),
+        perMessageDeflate: false,
+      });
       this.ws = ws;
 
       ws.on("message", (raw, isBinary) => {
@@ -118,11 +123,12 @@ class TtsTransport extends EventEmitter<TtsTransportEvents> {
 
       ws.on("error", (error) => this.fail(error));
       ws.on("close", () => {
+        const wasReady = this.ready;
         this.closed = true;
         this.ready = false;
         this.ws = undefined;
         if (!this.created) this.openReject?.(new Error("千问 TTS WebSocket 在 session.created 前关闭"));
-        if (this.configurePromise && !this.ready) this.configureReject?.(new Error("千问 TTS WebSocket 在初始化完成前关闭"));
+        if (this.configurePromise && !wasReady) this.configureReject?.(new Error("千问 TTS WebSocket 在初始化完成前关闭"));
         this.resolveFinished();
       });
     });
@@ -189,7 +195,10 @@ class TtsTransport extends EventEmitter<TtsTransportEvents> {
   private resolveFinished(): void {
     this.finishResolve?.();
     this.finishResolve = undefined;
-    this.emit("finished");
+    if (!this.finishedEmitted) {
+      this.finishedEmitted = true;
+      this.emit("finished");
+    }
   }
 
   private shutdownSocket(): void {
@@ -208,8 +217,213 @@ class TtsTransport extends EventEmitter<TtsTransportEvents> {
   }
 }
 
+/** Qwen-Audio-TTS/CosyVoice duplex inference protocol. */
+class InferenceTaskTtsTransport extends BaseTtsTransport {
+  private ws?: WebSocket;
+  private openPromise?: Promise<void>;
+  private configurePromise?: Promise<void>;
+  private taskId?: string;
+  private taskStarted = false;
+  private cancelled = false;
+  private closed = false;
+  private configureResolve?: () => void;
+  private configureReject?: (error: Error) => void;
+  private finishPromise?: Promise<void>;
+  private finishResolve?: () => void;
+  private finishedEmitted = false;
+
+  constructor(private readonly connection: QwenTtsPrewarmConfig) {
+    super();
+  }
+
+  open(): Promise<void> {
+    if (this.ws?.readyState === WebSocket.OPEN && !this.closed) return Promise.resolve();
+    if (this.openPromise) return this.openPromise;
+    this.openPromise = new Promise<void>((resolve, reject) => {
+      const url = resolveTtsWebSocketUrl(this.connection.baseUrl, this.connection.model);
+      const ws = new WebSocket(url, {
+        headers: buildHeaders(this.connection),
+        perMessageDeflate: false,
+      });
+      this.ws = ws;
+      ws.once("open", resolve);
+      ws.once("error", reject);
+
+      ws.on("message", (raw, isBinary) => {
+        if (isBinary) {
+          if (!this.cancelled) this.emit("audio", Buffer.from(raw as Buffer));
+          return;
+        }
+        try {
+          const event = JSON.parse(raw.toString()) as {
+            header?: {
+              event?: string;
+              task_id?: string;
+              error_code?: string;
+              error_message?: string;
+            };
+          };
+          const header = event.header;
+          if (header?.task_id && this.taskId && header.task_id !== this.taskId) return;
+          if (header?.event === "task-started") {
+            this.taskStarted = true;
+            this.configureResolve?.();
+            this.configureResolve = undefined;
+            this.configureReject = undefined;
+            return;
+          }
+          if (header?.event === "task-finished") {
+            this.resolveFinished();
+            this.shutdownSocket();
+            return;
+          }
+          if (header?.event === "task-failed") {
+            this.fail(new Error(`千问 Qwen-Audio-TTS 错误${header.error_code ? `(${header.error_code})` : ""}：${header.error_message ?? "未知错误"}`));
+          }
+        } catch (error) {
+          this.fail(error instanceof Error ? error : new Error(String(error)));
+        }
+      });
+
+      ws.on("error", (error) => {
+        if (!this.closed && !this.cancelled) this.fail(error);
+      });
+      ws.on("close", () => {
+        const started = this.taskStarted;
+        this.closed = true;
+        this.ws = undefined;
+        if (this.configurePromise && !started && !this.cancelled) {
+          this.configureReject?.(new Error("Qwen-Audio-TTS WebSocket 在 task-started 前关闭"));
+        }
+        this.resolveFinished();
+      });
+    });
+    return this.openPromise;
+  }
+
+  configure(config: QwenTtsConfig, instructions: string): Promise<void> {
+    if (this.taskStarted && !this.closed) return Promise.resolve();
+    if (this.configurePromise) return this.configurePromise;
+    this.configurePromise = (async () => {
+      await this.open();
+      this.taskId = randomUUID();
+      this.cancelled = false;
+      await new Promise<void>((resolve, reject) => {
+        this.configureResolve = resolve;
+        this.configureReject = reject;
+        this.send({
+          header: {
+            action: "run-task",
+            task_id: this.taskId,
+            streaming: "duplex",
+          },
+          payload: {
+            task_group: "audio",
+            task: "tts",
+            function: "SpeechSynthesizer",
+            model: config.model,
+            parameters: {
+              text_type: "PlainText",
+              voice: config.voice,
+              format: "pcm",
+              sample_rate: config.sampleRate,
+              volume: 50,
+              rate: 1.0,
+              pitch: 1.0,
+              enable_ssml: false,
+              language_hints: [normalizeInferenceLanguage(config.language)],
+              instruction: instructions,
+            },
+            input: {},
+          },
+        });
+      });
+    })();
+    return this.configurePromise;
+  }
+
+  appendText(text: string): void {
+    if (!this.taskStarted || this.cancelled || !text.trim() || !this.taskId) return;
+    this.send({
+      header: {
+        action: "continue-task",
+        task_id: this.taskId,
+        streaming: "duplex",
+      },
+      payload: { input: { text } },
+    });
+  }
+
+  async finish(): Promise<void> {
+    if (this.closed || this.cancelled || !this.taskId) return;
+    this.finishPromise ??= new Promise<void>((resolve) => {
+      this.finishResolve = resolve;
+    });
+    this.send({
+      header: {
+        action: "finish-task",
+        task_id: this.taskId,
+        streaming: "duplex",
+      },
+      payload: { input: {} },
+    });
+    await this.finishPromise;
+  }
+
+  cancel(): void {
+    if (this.cancelled) return;
+    this.cancelled = true;
+    if (this.taskId && this.ws?.readyState === WebSocket.OPEN) {
+      this.send({
+        header: {
+          action: "finish-task",
+          task_id: this.taskId,
+          streaming: "duplex",
+        },
+        payload: { input: { directive: "cancel" } },
+      });
+      const timer = setTimeout(() => this.shutdownSocket(), 500);
+      timer.unref?.();
+    } else {
+      this.shutdownSocket();
+    }
+    this.resolveFinished();
+  }
+
+  private fail(error: Error): void {
+    this.configureReject?.(error);
+    this.emit("error", error);
+    this.shutdownSocket();
+    this.resolveFinished();
+  }
+
+  private resolveFinished(): void {
+    this.finishResolve?.();
+    this.finishResolve = undefined;
+    if (!this.finishedEmitted) {
+      this.finishedEmitted = true;
+      this.emit("finished");
+    }
+  }
+
+  private shutdownSocket(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.taskStarted = false;
+    const ws = this.ws;
+    this.ws = undefined;
+    if (!ws) return;
+    try { ws.close(); } catch { /* ignore */ }
+  }
+
+  private send(payload: unknown): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(JSON.stringify(payload));
+  }
+}
+
 export class QwenTtsRealtimeClient extends EventEmitter<QwenTtsEvents> {
-  private transport?: TtsTransport;
+  private transport?: BaseTtsTransport;
   private connectPromise?: Promise<void>;
   private finished = false;
 
@@ -225,7 +439,7 @@ export class QwenTtsRealtimeClient extends EventEmitter<QwenTtsEvents> {
     const key = poolKey(config);
     const existing = warmPool.get(key);
     if (existing) return existing.transport.open();
-    const transport = new TtsTransport(config);
+    const transport = createTransport(config);
     const timer = setTimeout(() => {
       const current = warmPool.get(key);
       if (current?.transport !== transport) return;
@@ -267,7 +481,7 @@ export class QwenTtsRealtimeClient extends EventEmitter<QwenTtsEvents> {
         warmPool.delete(key);
         this.transport = warm.transport;
       } else {
-        this.transport = new TtsTransport(connection);
+        this.transport = createTransport(connection);
       }
       this.transport.on("audio", (audio) => this.emit("audio", audio));
       this.transport.on("error", (error) => this.emit("error", error));
@@ -299,6 +513,36 @@ export class QwenTtsRealtimeClient extends EventEmitter<QwenTtsEvents> {
   }
 }
 
+export function isQwenAudioTtsModel(model: string): boolean {
+  return model.trim().toLowerCase().startsWith("qwen-audio-") && model.toLowerCase().includes("-tts-");
+}
+
+export function resolveTtsProtocol(model: string): QwenTtsProtocol {
+  return isQwenAudioTtsModel(model) || model.trim().toLowerCase().startsWith("cosyvoice-")
+    ? "dashscope_inference"
+    : "qwen_realtime";
+}
+
+export function resolveTtsWebSocketUrl(baseUrl: string, model: string): string {
+  const url = new URL(baseUrl);
+  if (resolveTtsProtocol(model) === "dashscope_inference") {
+    url.pathname = url.pathname.replace(/\/api-ws\/v1\/realtime\/?$/u, "/api-ws/v1/inference/");
+    if (!/\/api-ws\/v1\/inference\/?$/u.test(url.pathname)) {
+      url.pathname = "/api-ws/v1/inference/";
+    }
+    url.search = "";
+  } else {
+    url.searchParams.set("model", model);
+  }
+  return url.toString();
+}
+
+function createTransport(config: QwenTtsPrewarmConfig): BaseTtsTransport {
+  return resolveTtsProtocol(config.model) === "dashscope_inference"
+    ? new InferenceTaskTtsTransport(config)
+    : new RealtimeSessionTtsTransport(config);
+}
+
 function connectionConfig(config: QwenTtsConfig): QwenTtsPrewarmConfig {
   return {
     apiKey: config.apiKey,
@@ -308,7 +552,23 @@ function connectionConfig(config: QwenTtsConfig): QwenTtsPrewarmConfig {
   };
 }
 
+function buildHeaders(config: QwenTtsPrewarmConfig): Record<string, string> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${config.apiKey}`,
+    "user-agent": "aipany-realtime-gateway/0.7",
+  };
+  if (config.workspaceId) headers["X-DashScope-WorkSpace"] = config.workspaceId;
+  return headers;
+}
+
+function normalizeInferenceLanguage(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (["chinese", "zh-cn", "zh_cn", "zh"].includes(normalized)) return "zh";
+  if (["english", "en-us", "en_us", "en"].includes(normalized)) return "en";
+  return normalized || "zh";
+}
+
 function poolKey(config: QwenTtsPrewarmConfig): string {
   const secretHash = createHash("sha256").update(config.apiKey).digest("hex").slice(0, 12);
-  return [config.baseUrl, config.model, config.workspaceId ?? "", secretHash].join("|");
+  return [resolveTtsWebSocketUrl(config.baseUrl, config.model), config.model, config.workspaceId ?? "", secretHash].join("|");
 }

@@ -44,6 +44,7 @@ class RealtimeClient(
         .build()
     private val scheduler = Executors.newSingleThreadScheduledExecutor()
     private val connectionGeneration = AtomicLong(0)
+    private val audioGate = ResponseAudioGate()
 
     @Volatile private var socket: WebSocket? = null
     @Volatile private var connected = false
@@ -96,6 +97,7 @@ class RealtimeClient(
                 reconnectAttempt = 0
                 activeResponseId = null
                 firstAudioReceivedReported = false
+                audioGate.reset()
                 ClientAudioControlBus.assistantSpeaking(false)
                 onState("安全连接已建立，正在启动实时语音")
                 webSocket.send(
@@ -138,6 +140,7 @@ class RealtimeClient(
                 if (generation != connectionGeneration.get()) return
                 try {
                     val event = JSONObject(text)
+                    val responseId = event.optString("responseId").ifBlank { null }
                     when (event.optString("type")) {
                         "pong" -> {
                             val timestamp = event.optLong("timestamp", 0L)
@@ -148,13 +151,33 @@ class RealtimeClient(
                                 sendTelemetry("heartbeat_rtt", rtt.toDouble())
                             }
                         }
-                        "backchannel.audio.started" -> ClientAudioControlBus.assistantSpeaking(true)
-                        "backchannel.audio.done" -> ClientAudioControlBus.assistantSpeaking(false)
+                        "backchannel.audio.started" -> {
+                            audioGate.onBackchannelStarted()
+                            ClientAudioControlBus.assistantSpeaking(true)
+                        }
+                        "backchannel.audio.done" -> {
+                            audioGate.onBackchannelFinished()
+                            ClientAudioControlBus.assistantSpeaking(false)
+                        }
                         "response.created" -> {
-                            activeResponseId = event.optString("responseId").ifBlank { null }
+                            activeResponseId = responseId
+                            firstAudioReceivedReported = false
+                            audioGate.onResponseCreated(responseId)
+                        }
+                        "response.audio.started" -> {
+                            if (audioGate.onAudioStarted(responseId)) {
+                                ClientAudioControlBus.assistantSpeaking(true)
+                            }
+                        }
+                        "response.audio.done", "response.done" -> {
+                            audioGate.onResponseFinished(responseId)
+                            activeResponseId = null
                             firstAudioReceivedReported = false
                         }
-                        "response.done", "response.interrupted" -> {
+                        "response.interrupted" -> {
+                            audioGate.cancelLocally()
+                            ClientAudioControlBus.interrupt()
+                            audioGate.onResponseFinished(responseId)
                             activeResponseId = null
                             firstAudioReceivedReported = false
                         }
@@ -167,6 +190,7 @@ class RealtimeClient(
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                 if (generation != connectionGeneration.get()) return
+                if (!audioGate.acceptsBinaryAudio()) return
                 if (activeResponseId != null && !firstAudioReceivedReported) {
                     firstAudioReceivedReported = true
                     sendTelemetry("first_audio_received")
@@ -177,6 +201,7 @@ class RealtimeClient(
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
                 if (generation != connectionGeneration.get()) return
                 connected = false
+                audioGate.reset()
                 ClientAudioControlBus.assistantSpeaking(false)
                 webSocket.close(code, reason)
             }
@@ -186,6 +211,7 @@ class RealtimeClient(
                 val wasConnected = connected
                 connected = false
                 socket = null
+                audioGate.reset()
                 ClientAudioControlBus.assistantSpeaking(false)
                 handleUnexpectedDisconnect(DisconnectInfo(code, reason, null, wasConnected, reconnectAttempt))
             }
@@ -195,6 +221,7 @@ class RealtimeClient(
                 val wasConnected = connected
                 connected = false
                 socket = null
+                audioGate.reset()
                 ClientAudioControlBus.assistantSpeaking(false)
                 val detail = response?.let { " HTTP ${it.code}" }.orEmpty()
                 val message = "${t.message ?: t.javaClass.simpleName}$detail"
@@ -237,6 +264,8 @@ class RealtimeClient(
     }
 
     fun cancelResponse(): Boolean {
+        audioGate.cancelLocally()
+        ClientAudioControlBus.interrupt()
         sendTelemetry("barge_in_detected")
         return sendControl("response.cancel")
     }
@@ -297,6 +326,7 @@ class RealtimeClient(
         connected = false
         activeResponseId = null
         firstAudioReceivedReported = false
+        audioGate.reset()
         ClientAudioControlBus.assistantSpeaking(false)
         val current = socket
         socket = null

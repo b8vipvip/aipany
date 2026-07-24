@@ -23,16 +23,16 @@ const envSchema = z.object({
   DASHSCOPE_ASR_WS_BASE_URL: optionalUrl,
   DASHSCOPE_TTS_WS_BASE_URL: optionalUrl,
 
-  QWEN_ASR_MODEL: z.string().default("qwen3-asr-flash-realtime"),
+  QWEN_ASR_MODEL: z.string().default("qwen3-asr-flash-realtime-2026-02-10"),
   QWEN_ASR_LANGUAGE: z.string().default("zh"),
   QWEN_ASR_VAD_THRESHOLD: z.coerce.number().min(-1).max(1).default(0),
   QWEN_ASR_SILENCE_MS: z.coerce.number().int().min(200).max(6000).default(500),
 
-  QWEN_TTS_MODEL: z.string().default("qwen3-tts-instruct-flash-realtime"),
-  QWEN_TTS_VOICE: z.string().default("Cherry"),
+  QWEN_TTS_MODEL: z.string().default("qwen-audio-3.0-tts-plus"),
+  QWEN_TTS_VOICE: z.string().default("longanlingxin"),
   QWEN_TTS_LANGUAGE: z.string().default("Chinese"),
   QWEN_TTS_SAMPLE_RATE: z.coerce.number().int().default(24000),
-  QWEN_TTS_OPTIMIZE_INSTRUCTIONS: booleanString.default("false"),
+  QWEN_TTS_OPTIMIZE_INSTRUCTIONS: booleanString.default("true"),
 
   QWEN_OMNI_API_KEY: z.string().default(""),
   QWEN_OMNI_REALTIME_ENABLED: booleanString.default("false"),
