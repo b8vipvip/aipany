@@ -61,6 +61,7 @@ interface ActiveSpeculation {
   partialText: string;
   startedAt: number;
   abortController: AbortController;
+  expiryTimer: ReturnType<typeof setTimeout>;
   pendingDeltas: string[];
   sink?: (delta: string) => Promise<void> | void;
   delivery: Promise<void>;
@@ -102,10 +103,16 @@ export class SpeculativeLlmCoordinator {
     }
 
     const abortController = new AbortController();
+    const expiryTimer = setTimeout(() => {
+      if (this.active?.abortController !== abortController || this.active.adopted) return;
+      this.cancel("expired");
+    }, this.maxAgeMs);
+    expiryTimer.unref?.();
     const state: ActiveSpeculation = {
       partialText: text,
       startedAt: now,
       abortController,
+      expiryTimer,
       pendingDeltas: [],
       delivery: Promise.resolve(),
       done: Promise.resolve(),
@@ -146,15 +153,25 @@ export class SpeculativeLlmCoordinator {
       return this.runOriginal(options);
     }
 
+    clearTimeout(state.expiryTimer);
     state.adopted = true;
     state.sink = options.onDelta;
     this.stats.adopted += 1;
+
+    const abortAdopted = () => state.abortController.abort(options.signal.reason);
+    if (options.signal.aborted) abortAdopted();
+    else options.signal.addEventListener("abort", abortAdopted, { once: true });
+
     const buffered = state.pendingDeltas.splice(0);
     for (const delta of buffered) {
       state.delivery = state.delivery.then(() => Promise.resolve(options.onDelta(delta)));
     }
-    await state.done;
-    await state.delivery;
+    try {
+      await state.done;
+      await state.delivery;
+    } finally {
+      options.signal.removeEventListener("abort", abortAdopted);
+    }
     if (state.error && !isAbortError(state.error)) {
       this.active = undefined;
       return this.runOriginal(options);
@@ -165,7 +182,8 @@ export class SpeculativeLlmCoordinator {
   cancel(_reason = "cancelled"): void {
     const state = this.active;
     if (!state) return;
-    if (!state.adopted) {
+    clearTimeout(state.expiryTimer);
+    if (!state.abortController.signal.aborted) {
       state.abortController.abort();
       this.stats.aborted += 1;
     }
