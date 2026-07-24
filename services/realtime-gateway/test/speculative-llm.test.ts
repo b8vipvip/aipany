@@ -14,14 +14,15 @@ const history = [
   { role: "assistant" as const, content: "你好呀" },
 ];
 
-test("stable partial tracker only starts early after repeated complete text", () => {
+test("stable partial tracker starts when content stays stable and punctuation completes the turn", () => {
   const tracker = new StablePartialTracker();
   tracker.observe("我想查一下天气");
   assert.equal(tracker.shouldStartEarly(), false);
   tracker.observe("我想查一下天气。");
-  assert.equal(tracker.shouldStartEarly(), false);
-  tracker.observe("我想查一下天气。");
   assert.equal(tracker.shouldStartEarly(), true);
+  tracker.reset();
+  tracker.observe("我想查一下天气。");
+  assert.equal(tracker.shouldStartEarly(), false);
 });
 
 test("text similarity accepts final punctuation and small ASR corrections", () => {
