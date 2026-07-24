@@ -45,6 +45,8 @@ class RealtimeClient(
     private val scheduler = Executors.newSingleThreadScheduledExecutor()
     private val connectionGeneration = AtomicLong(0)
     private val audioGate = ResponseAudioGate()
+    private val audioCommitGuard = AudioCommitGuard()
+    private val lateAudioLock = Any()
 
     @Volatile private var socket: WebSocket? = null
     @Volatile private var connected = false
@@ -54,7 +56,11 @@ class RealtimeClient(
     @Volatile private var reconnectAttempt = 0
     @Volatile private var reconnectFuture: ScheduledFuture<*>? = null
     @Volatile private var activeResponseId: String? = null
+    @Volatile private var cancelledResponseId: String? = null
     @Volatile private var firstAudioReceivedReported = false
+    @Volatile private var lastCancelledAtMs = 0L
+    private var lateAudioDroppedFrames = 0
+    private var lateAudioDroppedBytes = 0L
 
     init {
         ClientTelemetryBus.attach { name, valueMs -> sendTelemetry(name, valueMs) }
@@ -96,7 +102,11 @@ class RealtimeClient(
                 lastPongAt = System.currentTimeMillis()
                 reconnectAttempt = 0
                 activeResponseId = null
+                cancelledResponseId = null
                 firstAudioReceivedReported = false
+                lastCancelledAtMs = 0L
+                clearLateAudioDropCounters()
+                audioCommitGuard.reset()
                 audioGate.reset()
                 ClientAudioControlBus.assistantSpeaking(false)
                 onState("安全连接已建立，正在启动实时语音")
@@ -151,6 +161,9 @@ class RealtimeClient(
                                 sendTelemetry("heartbeat_rtt", rtt.toDouble())
                             }
                         }
+                        "session.ready" -> audioCommitGuard.reset()
+                        "transcript.final" -> audioCommitGuard.resolveTranscript()
+                        "error" -> audioCommitGuard.resolveTranscript()
                         "backchannel.audio.started" -> {
                             audioGate.onBackchannelStarted()
                             ClientAudioControlBus.assistantSpeaking(true)
@@ -160,7 +173,9 @@ class RealtimeClient(
                             ClientAudioControlBus.assistantSpeaking(false)
                         }
                         "response.created" -> {
+                            flushLateAudioDropTelemetry()
                             activeResponseId = responseId
+                            cancelledResponseId = null
                             firstAudioReceivedReported = false
                             audioGate.onResponseCreated(responseId)
                         }
@@ -175,9 +190,15 @@ class RealtimeClient(
                             firstAudioReceivedReported = false
                         }
                         "response.interrupted" -> {
+                            val alreadyStoppedLocally = cancelledResponseId != null &&
+                                (responseId == null || responseId == cancelledResponseId)
+                            if (!alreadyStoppedLocally) {
+                                lastCancelledAtMs = System.currentTimeMillis()
+                                ClientAudioControlBus.interrupt()
+                            }
                             audioGate.cancelLocally()
-                            ClientAudioControlBus.interrupt()
                             audioGate.onResponseFinished(responseId)
+                            cancelledResponseId = responseId ?: activeResponseId ?: cancelledResponseId
                             activeResponseId = null
                             firstAudioReceivedReported = false
                         }
@@ -190,7 +211,10 @@ class RealtimeClient(
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                 if (generation != connectionGeneration.get()) return
-                if (!audioGate.acceptsBinaryAudio()) return
+                if (!audioGate.acceptsBinaryAudio()) {
+                    noteLateAudioDrop(bytes.size)
+                    return
+                }
                 if (activeResponseId != null && !firstAudioReceivedReported) {
                     firstAudioReceivedReported = true
                     sendTelemetry("first_audio_received")
@@ -200,7 +224,9 @@ class RealtimeClient(
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
                 if (generation != connectionGeneration.get()) return
+                flushLateAudioDropTelemetry()
                 connected = false
+                audioCommitGuard.reset()
                 audioGate.reset()
                 ClientAudioControlBus.assistantSpeaking(false)
                 webSocket.close(code, reason)
@@ -211,6 +237,7 @@ class RealtimeClient(
                 val wasConnected = connected
                 connected = false
                 socket = null
+                audioCommitGuard.reset()
                 audioGate.reset()
                 ClientAudioControlBus.assistantSpeaking(false)
                 handleUnexpectedDisconnect(DisconnectInfo(code, reason, null, wasConnected, reconnectAttempt))
@@ -218,9 +245,11 @@ class RealtimeClient(
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 if (generation != connectionGeneration.get()) return
+                flushLateAudioDropTelemetry()
                 val wasConnected = connected
                 connected = false
                 socket = null
+                audioCommitGuard.reset()
                 audioGate.reset()
                 ClientAudioControlBus.assistantSpeaking(false)
                 val detail = response?.let { " HTTP ${it.code}" }.orEmpty()
@@ -259,14 +288,28 @@ class RealtimeClient(
     }
 
     fun commitAudio(): Boolean {
+        val decision = audioCommitGuard.tryCommit(System.currentTimeMillis())
+        if (!decision.allowed) {
+            sendTelemetry(
+                "endpoint_commit_suppressed",
+                details = mapOf("reason" to (decision.reason?.wireValue ?: "unknown")),
+            )
+            return false
+        }
         sendTelemetry("endpoint_detected")
-        return sendControl("input_audio_buffer.commit")
+        val sent = sendControl("input_audio_buffer.commit")
+        if (!sent) audioCommitGuard.resolveTranscript()
+        return sent
     }
 
     fun cancelResponse(): Boolean {
+        val responseId = activeResponseId ?: return false
+        if (cancelledResponseId == responseId) return false
+        cancelledResponseId = responseId
+        lastCancelledAtMs = System.currentTimeMillis()
         audioGate.cancelLocally()
         ClientAudioControlBus.interrupt()
-        sendTelemetry("barge_in_detected")
+        sendTelemetry("barge_in_detected", details = mapOf("responseActive" to true))
         return sendControl("response.cancel")
     }
 
@@ -323,9 +366,13 @@ class RealtimeClient(
         reconnectFuture?.cancel(false)
         reconnectFuture = null
         connectionGeneration.incrementAndGet()
+        flushLateAudioDropTelemetry()
         connected = false
         activeResponseId = null
+        cancelledResponseId = null
         firstAudioReceivedReported = false
+        lastCancelledAtMs = 0L
+        audioCommitGuard.reset()
         audioGate.reset()
         ClientAudioControlBus.assistantSpeaking(false)
         val current = socket
@@ -333,6 +380,40 @@ class RealtimeClient(
         current?.let {
             if (sendFinish) runCatching { it.send(JSONObject().put("type", "session.finish").toString()) }
             runCatching { it.close(1000, "client close") }
+        }
+    }
+
+    private fun noteLateAudioDrop(byteCount: Int) {
+        val cancelledAt = lastCancelledAtMs
+        if (cancelledAt <= 0L || System.currentTimeMillis() - cancelledAt > 5_000L) return
+        synchronized(lateAudioLock) {
+            lateAudioDroppedFrames += 1
+            lateAudioDroppedBytes += byteCount.toLong()
+        }
+    }
+
+    private fun flushLateAudioDropTelemetry() {
+        val snapshot = synchronized(lateAudioLock) {
+            if (lateAudioDroppedFrames <= 0) return
+            val value = lateAudioDroppedFrames to lateAudioDroppedBytes
+            lateAudioDroppedFrames = 0
+            lateAudioDroppedBytes = 0L
+            value
+        }
+        sendTelemetry(
+            "audio_dropped_after_cancel",
+            details = mapOf(
+                "frames" to snapshot.first,
+                "bytes" to snapshot.second,
+                "responseIdPresent" to (cancelledResponseId != null),
+            ),
+        )
+    }
+
+    private fun clearLateAudioDropCounters() {
+        synchronized(lateAudioLock) {
+            lateAudioDroppedFrames = 0
+            lateAudioDroppedBytes = 0L
         }
     }
 
