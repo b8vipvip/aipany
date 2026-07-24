@@ -75,7 +75,7 @@ export class OpenAiCompatibleLlm {
     if (!options.onRouteSelected) return;
     const trace = getLlmRequestTrace(traceId);
     const selected = trace?.attempts.find((attempt) => attempt.routeKey === trace.selectedRouteKey && attempt.status === "success")
-      ?? trace?.attempts.findLast((attempt) => attempt.status === "success");
+      ?? [...(trace?.attempts ?? [])].reverse().find((attempt) => attempt.status === "success");
     if (!trace || !selected) return;
     options.onRouteSelected({
       traceId,
