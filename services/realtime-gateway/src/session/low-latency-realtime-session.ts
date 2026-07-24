@@ -1,19 +1,30 @@
 import type { SessionStartEvent, UserEmotion } from "@aipany/protocol";
 import WebSocket from "ws";
 import { resolveRequestedVoice } from "../mobile/client-capabilities.js";
+import { recordGlobalRealtimeEvent } from "../observability/global-observability.js";
 import { AcousticProsodyAnalyzer, type AcousticProsodySnapshot } from "../pipeline/acoustic-prosody-analyzer.js";
 import { BackchannelEngine, getBackchannelAudio } from "../pipeline/backchannel-engine.js";
 import { InterruptionMemory } from "../pipeline/interruption-memory.js";
+import { LiveModelRouter } from "../pipeline/live-model-router.js";
 import { SemanticTurnManager } from "../pipeline/semantic-turn-manager.js";
 import {
   buildSpeculativeMessages,
   SpeculativeLlmCoordinator,
   StablePartialTracker,
   type StreamChatFunction,
+  type StreamChatOptions,
 } from "../pipeline/speculative-llm.js";
-import type { ChatMessage } from "../providers/openai-compatible-llm.js";
+import type { ChatMessage, LlmRouteSelectionSummary } from "../providers/openai-compatible-llm.js";
 import { QwenTtsRealtimeClient } from "../providers/qwen-tts.js";
 import { RealtimeSession } from "./realtime-session.js";
+
+interface RoutedStreamChatOptions extends StreamChatOptions {
+  routeClass?: import("../pipeline/live-model-router.js").LiveRouteClass;
+  experimentVariant?: import("../pipeline/live-model-router.js").LiveRoutingExperimentVariant;
+  onRouteSelected?: (summary: LlmRouteSelectionSummary) => void;
+}
+
+type RoutedStreamChatFunction = (options: RoutedStreamChatOptions) => Promise<void>;
 
 interface RealtimeSessionInternals {
   client: WebSocket;
@@ -24,7 +35,7 @@ interface RealtimeSessionInternals {
     on(event: "speechStopped", listener: () => void): unknown;
     on(event: "final", listener: () => void): unknown;
   };
-  llm: { streamChat: StreamChatFunction };
+  llm: { streamChat: RoutedStreamChatFunction };
   liveHumanizer: { setAcousticContext(snapshot: AcousticProsodySnapshot | undefined): void };
   history: ChatMessage[];
   activeResponse?: { id: string };
@@ -78,6 +89,10 @@ export function resolveOwnerFocusSpeakerAnalysisWaitMs(
  * Phase 3:
  * - lightweight acoustic prosody analysis feeds the deterministic Humanizer
  *   without adding a new model call or making psychological claims
+ *
+ * Phase 4:
+ * - deterministic task-aware LLM routing and A/B assignment with safe routing
+ *   telemetry for production comparison
  */
 export class LowLatencyRealtimeSession extends RealtimeSession {
   private configuredOwnerFocusSpeakerAnalysisWaitMs?: number;
@@ -86,6 +101,7 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
   private readonly backchannelEngine = new BackchannelEngine();
   private readonly interruptionMemory = new InterruptionMemory();
   private readonly acousticProsodyAnalyzer = new AcousticProsodyAnalyzer();
+  private readonly liveModelRouter = new LiveModelRouter();
   private speculativeLlm?: SpeculativeLlmCoordinator;
   private optimizationHooksInstalled = false;
   private continuityHookInstalled = false;
@@ -103,9 +119,6 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
       state.config.qwen.ttsVoice,
       event.session.outputVoice,
     );
-    // Android clients continuously stream PCM and explicitly send local endpoint
-    // commits. Give the upstream VAD more room for thinking pauses while the
-    // semantic commit policy handles clear completions earlier.
     if (event.session.device.platform.toLowerCase() === "android") {
       state.config.qwen.silenceMs = Math.max(state.config.qwen.silenceMs, 1_200);
     }
@@ -160,7 +173,31 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
   private installSpeculativeLlm(state: RealtimeSessionInternals): void {
     if (this.speculativeLlm) return;
     const original = state.llm.streamChat.bind(state.llm);
-    this.speculativeLlm = new SpeculativeLlmCoordinator(original);
+    const routedOriginal: StreamChatFunction = (options) => {
+      const decision = this.liveModelRouter.decide(options.messages, this.id);
+      const speculative = options.traceId?.startsWith("speculative-") === true;
+      recordGlobalRealtimeEvent({
+        level: "info",
+        category: "llm",
+        event: "llm.route.decision",
+        sessionId: this.id,
+        engine: "cascaded",
+        data: {
+          routeClass: decision.routeClass,
+          experimentVariant: decision.experimentVariant,
+          confidence: decision.confidence,
+          reason: decision.reason,
+          speculative,
+        },
+      });
+      return original({
+        ...options,
+        routeClass: decision.routeClass,
+        experimentVariant: decision.experimentVariant,
+        onRouteSelected: (summary) => this.recordRouteSelection(summary, speculative),
+      });
+    };
+    this.speculativeLlm = new SpeculativeLlmCoordinator(routedOriginal);
     state.llm.streamChat = (options) => {
       const continuity = this.interruptionMemory.consumeInstruction();
       const messages = continuity
@@ -168,6 +205,27 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
         : options.messages;
       return this.speculativeLlm!.streamOrAdopt({ ...options, messages });
     };
+  }
+
+  private recordRouteSelection(summary: LlmRouteSelectionSummary, speculative: boolean): void {
+    recordGlobalRealtimeEvent({
+      level: "info",
+      category: "llm",
+      event: "llm.route.selected",
+      sessionId: this.id,
+      engine: "cascaded",
+      data: {
+        routeClass: summary.routeClass,
+        experimentVariant: summary.experimentVariant,
+        providerId: summary.providerId,
+        providerName: summary.providerName,
+        model: summary.model,
+        protocol: summary.protocol,
+        firstTokenMs: summary.firstTokenMs,
+        totalMs: summary.totalMs,
+        speculative,
+      },
+    });
   }
 
   private installClientContinuityHook(state: RealtimeSessionInternals): void {
