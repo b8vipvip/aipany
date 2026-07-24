@@ -27,7 +27,6 @@ const PITCH_INTERVAL_SOURCE_SAMPLES = 1_600;
  */
 export class AcousticProsodyAnalyzer {
   private active = false;
-  private startedAt = 0;
   private sampleCount = 0;
   private sumSquares = 0;
   private peak = 0;
@@ -47,14 +46,13 @@ export class AcousticProsodyAnalyzer {
     if (this.active) this.process(audio);
   }
 
-  beginSpeech(now = Date.now()): void {
+  beginSpeech(): void {
     this.resetMetrics();
     this.active = true;
-    this.startedAt = now;
     if (this.preRollBytes > 0) this.process(Buffer.concat(this.preRoll, this.preRollBytes));
   }
 
-  endSpeech(now = Date.now()): AcousticProsodySnapshot | undefined {
+  endSpeech(): AcousticProsodySnapshot | undefined {
     if (!this.active || this.sampleCount < 160) {
       this.active = false;
       return undefined;
@@ -157,7 +155,6 @@ export class AcousticProsodyAnalyzer {
   }
 
   private resetMetrics(): void {
-    this.startedAt = 0;
     this.sampleCount = 0;
     this.sumSquares = 0;
     this.peak = 0;
