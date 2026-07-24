@@ -83,7 +83,6 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
   private optimizationHooksInstalled = false;
   private continuityHookInstalled = false;
   private pendingCommitTimer?: ReturnType<typeof setTimeout>;
-  private pendingCommitText = "";
   private backchannelEpoch = 0;
   private backchannelSpeechActive = false;
   private backchannelInFlight = false;
@@ -223,14 +222,12 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
     if (!asr) return;
     const decision = this.semanticTurnManager.decide(text);
     this.clearPendingCommit();
-    this.pendingCommitText = text;
     if (decision.completion === "complete" || decision.completion === "likely_complete") {
       this.backchannelEpoch += 1;
       this.backchannelSpeechActive = false;
     }
     this.pendingCommitTimer = setTimeout(() => {
       this.pendingCommitTimer = undefined;
-      this.pendingCommitText = "";
       asr.commit();
     }, decision.commitDelayMs);
     this.pendingCommitTimer.unref?.();
@@ -239,7 +236,6 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
   private clearPendingCommit(): void {
     if (this.pendingCommitTimer) clearTimeout(this.pendingCommitTimer);
     this.pendingCommitTimer = undefined;
-    this.pendingCommitText = "";
   }
 
   private startSpeculation(): void {
@@ -272,13 +268,20 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
       .then((audio) => {
         if (!audio.length || !this.backchannelSpeechActive || epoch !== this.backchannelEpoch) return;
         if (state.activeResponse || state.client.readyState !== WebSocket.OPEN) return;
+        const durationMs = Math.max(80, Math.ceil(audio.length / (24_000 * 2) * 1_000));
         state.client.send(JSON.stringify({
           type: "backchannel.audio.started",
           cue: decision.cue,
           reason: decision.reason,
+          durationMs,
         }));
         state.client.send(audio, { binary: true });
-        state.client.send(JSON.stringify({ type: "backchannel.audio.done" }));
+        const doneTimer = setTimeout(() => {
+          if (state.client.readyState === WebSocket.OPEN) {
+            state.client.send(JSON.stringify({ type: "backchannel.audio.done" }));
+          }
+        }, durationMs + 80);
+        doneTimer.unref?.();
       })
       .catch(() => undefined)
       .finally(() => {
