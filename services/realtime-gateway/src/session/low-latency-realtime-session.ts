@@ -1,6 +1,7 @@
 import type { SessionStartEvent, UserEmotion } from "@aipany/protocol";
 import WebSocket from "ws";
 import { resolveRequestedVoice } from "../mobile/client-capabilities.js";
+import { AcousticProsodyAnalyzer, type AcousticProsodySnapshot } from "../pipeline/acoustic-prosody-analyzer.js";
 import { BackchannelEngine, getBackchannelAudio } from "../pipeline/backchannel-engine.js";
 import { InterruptionMemory } from "../pipeline/interruption-memory.js";
 import { SemanticTurnManager } from "../pipeline/semantic-turn-manager.js";
@@ -24,6 +25,7 @@ interface RealtimeSessionInternals {
     on(event: "final", listener: () => void): unknown;
   };
   llm: { streamChat: StreamChatFunction };
+  liveHumanizer: { setAcousticContext(snapshot: AcousticProsodySnapshot | undefined): void };
   history: ChatMessage[];
   activeResponse?: { id: string };
   audioIntelligence?: {
@@ -72,6 +74,10 @@ export function resolveOwnerFocusSpeakerAnalysisWaitMs(
  * - conservative cached backchannels during long continuous narration
  * - one-turn interruption memory so the next answer can continue instead of
  *   restarting from the beginning
+ *
+ * Phase 3:
+ * - lightweight acoustic prosody analysis feeds the deterministic Humanizer
+ *   without adding a new model call or making psychological claims
  */
 export class LowLatencyRealtimeSession extends RealtimeSession {
   private configuredOwnerFocusSpeakerAnalysisWaitMs?: number;
@@ -79,6 +85,7 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
   private readonly semanticTurnManager = new SemanticTurnManager();
   private readonly backchannelEngine = new BackchannelEngine();
   private readonly interruptionMemory = new InterruptionMemory();
+  private readonly acousticProsodyAnalyzer = new AcousticProsodyAnalyzer();
   private speculativeLlm?: SpeculativeLlmCoordinator;
   private optimizationHooksInstalled = false;
   private continuityHookInstalled = false;
@@ -87,6 +94,7 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
   private backchannelSpeechActive = false;
   private backchannelInFlight = false;
   private currentResponseText = "";
+  private acousticSnapshotReady = false;
 
   override async start(event: SessionStartEvent): Promise<void> {
     const state = this.internals();
@@ -106,6 +114,11 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
     await super.start(event);
     this.syncOwnerFocusSpeakerAnalysisWait();
     this.installOptimizationHooks();
+  }
+
+  override appendAudio(audio: Buffer): void {
+    this.acousticProsodyAnalyzer.append(audio);
+    super.appendAudio(audio);
   }
 
   override commitAudio(): void {
@@ -139,6 +152,8 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
     this.speculativeLlm?.cancel("session_closed");
     this.backchannelEpoch += 1;
     this.backchannelSpeechActive = false;
+    this.acousticProsodyAnalyzer.reset();
+    this.internals().liveHumanizer.setAcousticContext(undefined);
     super.close();
   }
 
@@ -201,6 +216,9 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
       this.backchannelEpoch += 1;
       this.backchannelSpeechActive = true;
       this.backchannelEngine.beginSpeech();
+      this.acousticSnapshotReady = false;
+      this.internals().liveHumanizer.setAcousticContext(undefined);
+      this.acousticProsodyAnalyzer.beginSpeech();
       this.prewarmTts();
     });
     asr.on("partial", (result) => {
@@ -213,6 +231,7 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
       this.clearPendingCommit();
       this.backchannelSpeechActive = false;
       this.backchannelEngine.endSpeech();
+      this.publishAcousticSnapshot();
       this.startSpeculation();
       this.prewarmTts();
     });
@@ -220,7 +239,14 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
       this.clearPendingCommit();
       this.backchannelSpeechActive = false;
       this.backchannelEngine.endSpeech();
+      if (!this.acousticSnapshotReady) this.publishAcousticSnapshot();
     });
+  }
+
+  private publishAcousticSnapshot(): void {
+    const snapshot = this.acousticProsodyAnalyzer.endSpeech();
+    this.acousticSnapshotReady = Boolean(snapshot);
+    this.internals().liveHumanizer.setAcousticContext(snapshot);
   }
 
   private scheduleSemanticCommit(text: string): void {

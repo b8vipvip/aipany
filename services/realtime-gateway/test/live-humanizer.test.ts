@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { AcousticProsodySnapshot } from "../src/pipeline/acoustic-prosody-analyzer.js";
 import { LiveHumanizer } from "../src/pipeline/live-humanizer.js";
 
 function context(overrides: Partial<Parameters<LiveHumanizer["direct"]>[0]> = {}) {
@@ -10,6 +11,23 @@ function context(overrides: Partial<Parameters<LiveHumanizer["direct"]>[0]> = {}
     socialAction: "respond" as const,
     proactivity: 0.45,
     secondsSinceAiSpoke: 20,
+    ...overrides,
+  };
+}
+
+function acoustic(overrides: Partial<AcousticProsodySnapshot> = {}): AcousticProsodySnapshot {
+  return {
+    durationMs: 3200,
+    rmsDbfs: -25,
+    peakDbfs: -10,
+    dynamicRangeDb: 10,
+    silenceRatio: 0.12,
+    zeroCrossingRate: 0.09,
+    pitchHz: 180,
+    pitchVariation: 0.08,
+    energy: "medium",
+    tempoHint: "normal",
+    confidence: 0.8,
     ...overrides,
   };
 }
@@ -62,4 +80,44 @@ test("humanizer adds context-aware initiative only at high proactivity", () => {
 
   assert.match(active.responseInstruction, /小问题/);
   assert.match(quiet.responseInstruction, /不要为了延长对话机械地/);
+});
+
+test("humanizer uses low-arousal acoustic context only to soften its own delivery", () => {
+  const director = new LiveHumanizer();
+  director.setAcousticContext(acoustic({
+    energy: "low",
+    tempoHint: "slow",
+    silenceRatio: 0.36,
+    rmsDbfs: -35,
+  }));
+  const result = director.direct(context({ userText: "我今天回家比较晚", userEmotion: "unknown" }));
+
+  assert.equal(result.profileId, "reflective_soft");
+  assert.equal(result.pace, "relaxed");
+  assert.equal(result.acousticBasis?.energy, "low");
+  assert.match(result.responseInstruction, /绝不能据此断言/);
+  assert.doesNotMatch(result.responseInstruction, /你很悲伤|你很难过|你有抑郁/u);
+});
+
+test("explicit urgent language overrides a calm acoustic pattern", () => {
+  const director = new LiveHumanizer();
+  director.setAcousticContext(acoustic({
+    energy: "low",
+    tempoHint: "slow",
+    silenceRatio: 0.4,
+  }));
+  const result = director.direct(context({ userText: "快点，我马上要迟到了怎么办" }));
+
+  assert.equal(result.profileId, "focused_urgent");
+  assert.equal(result.pace, "brisk");
+});
+
+test("acoustic context is consumed per turn instead of leaking forever", () => {
+  const director = new LiveHumanizer();
+  director.setAcousticContext(acoustic({ energy: "high", tempoHint: "fast", rmsDbfs: -12 }));
+  const first = director.direct(context({ userText: "今天我们聊点新的东西吧" }));
+  const second = director.direct(context({ userText: "好，那开始吧" }));
+
+  assert.ok(first.acousticBasis);
+  assert.equal(second.acousticBasis, undefined);
 });
