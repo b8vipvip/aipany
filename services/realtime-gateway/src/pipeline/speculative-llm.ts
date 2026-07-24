@@ -199,16 +199,19 @@ export function textSimilarity(left: string, right: string): number {
 
   const previous = Array.from({ length: b.length + 1 }, (_, index) => index);
   for (let i = 1; i <= a.length; i += 1) {
-    let diagonal = previous[0];
+    let diagonal = previous[0] ?? 0;
     previous[0] = i;
     for (let j = 1; j <= b.length; j += 1) {
-      const old = previous[j];
+      const old = previous[j] ?? j;
+      const above = previous[j] ?? j;
+      const leftCost = previous[j - 1] ?? i;
       const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      previous[j] = Math.min(previous[j] + 1, previous[j - 1] + 1, diagonal + cost);
+      previous[j] = Math.min(above + 1, leftCost + 1, diagonal + cost);
       diagonal = old;
     }
   }
-  return 1 - previous[b.length] / Math.max(a.length, b.length);
+  const distance = previous[b.length] ?? Math.max(a.length, b.length);
+  return 1 - distance / Math.max(a.length, b.length);
 }
 
 function extractLastUserText(messages: ChatMessage[]): string | undefined {
