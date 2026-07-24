@@ -96,6 +96,7 @@ class RealtimeClient(
                 reconnectAttempt = 0
                 activeResponseId = null
                 firstAudioReceivedReported = false
+                ClientAudioControlBus.assistantSpeaking(false)
                 onState("安全连接已建立，正在启动实时语音")
                 webSocket.send(
                     JSONObject()
@@ -147,6 +148,8 @@ class RealtimeClient(
                                 sendTelemetry("heartbeat_rtt", rtt.toDouble())
                             }
                         }
+                        "backchannel.audio.started" -> ClientAudioControlBus.assistantSpeaking(true)
+                        "backchannel.audio.done" -> ClientAudioControlBus.assistantSpeaking(false)
                         "response.created" -> {
                             activeResponseId = event.optString("responseId").ifBlank { null }
                             firstAudioReceivedReported = false
@@ -174,6 +177,7 @@ class RealtimeClient(
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
                 if (generation != connectionGeneration.get()) return
                 connected = false
+                ClientAudioControlBus.assistantSpeaking(false)
                 webSocket.close(code, reason)
             }
 
@@ -182,6 +186,7 @@ class RealtimeClient(
                 val wasConnected = connected
                 connected = false
                 socket = null
+                ClientAudioControlBus.assistantSpeaking(false)
                 handleUnexpectedDisconnect(DisconnectInfo(code, reason, null, wasConnected, reconnectAttempt))
             }
 
@@ -190,6 +195,7 @@ class RealtimeClient(
                 val wasConnected = connected
                 connected = false
                 socket = null
+                ClientAudioControlBus.assistantSpeaking(false)
                 val detail = response?.let { " HTTP ${it.code}" }.orEmpty()
                 val message = "${t.message ?: t.javaClass.simpleName}$detail"
                 handleUnexpectedDisconnect(
@@ -291,6 +297,7 @@ class RealtimeClient(
         connected = false
         activeResponseId = null
         firstAudioReceivedReported = false
+        ClientAudioControlBus.assistantSpeaking(false)
         val current = socket
         socket = null
         current?.let {

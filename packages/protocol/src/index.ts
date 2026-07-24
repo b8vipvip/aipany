@@ -192,6 +192,8 @@ export type ServerEvent =
       noiseSuppressionGain: number;
       clippedSamples: number;
     }
+  | { type: "backchannel.audio.started"; cue: string; reason: string }
+  | { type: "backchannel.audio.done" }
   | { type: "response.created"; responseId: string }
   | { type: "response.text.delta"; responseId: string; delta: string }
   | { type: "response.audio.started"; responseId: string; format: AudioFormat }
