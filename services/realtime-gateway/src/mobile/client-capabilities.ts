@@ -37,7 +37,19 @@ const QWEN_AUDIO_REALTIME_VOICES: ClientVoiceOption[] = [
   { id: "longanlingxin", name: "龙安灵心", gender: "female", description: "知心温暖，适合长期陪伴式对话", previewable: true },
   { id: "longanlingxi", name: "龙安灵希", gender: "female", description: "可爱甜美，表达灵动", previewable: true },
   { id: "longanxiaoxin", name: "龙安小昕", gender: "female", description: "亲切活泼，适合轻松聊天", previewable: true },
-  { id: "longanlufeng", name: "龙安鲁风", gender: "neutral", description: "明亮开朗，表达有活力", previewable: true },
+  { id: "longanlufeng", name: "龙安鲁风", gender: "male", description: "明亮开朗，表达有活力", previewable: true },
+];
+
+const QWEN_AUDIO_TTS_PLUS_VOICES: ClientVoiceOption[] = [
+  { id: "longanlingxin", name: "龙安灵心", gender: "female", description: "旗舰知心温暖音，适合社交陪伴与情绪化表达" },
+  { id: "longanlufeng", name: "龙安鲁风", gender: "male", description: "旗舰明亮开朗男声，表达自然有活力" },
+];
+
+const QWEN_AUDIO_TTS_FLASH_VOICES: ClientVoiceOption[] = [
+  { id: "longanhuan_v3.6", name: "龙安欢", gender: "female", description: "精品中文陪伴音色，活泼自然" },
+  { id: "longjielidou_v3.6", name: "龙杰力豆", gender: "male", description: "天真男童音色，适合儿童陪伴" },
+  { id: "loongeva_v3.6", name: "loongeva", gender: "female", description: "高智优雅英文女声" },
+  { id: "loongjohn", name: "loongJohn", gender: "male", description: "沉稳亲切的美式英文男声" },
 ];
 
 const QWEN35_OMNI_REALTIME_VOICE_IDS = [
@@ -109,9 +121,12 @@ const QWEN3_INSTRUCT_REALTIME_VOICES: ClientVoiceOption[] = [
 ];
 
 export function getClientVoiceOptions(model: string, configuredVoice: string): ClientVoiceOption[] {
+  const normalized = model.trim().toLowerCase();
+  if (normalized === "qwen-audio-3.0-tts-plus") return ensureConfiguredVoice(QWEN_AUDIO_TTS_PLUS_VOICES, configuredVoice);
+  if (normalized === "qwen-audio-3.0-tts-flash") return ensureConfiguredVoice(QWEN_AUDIO_TTS_FLASH_VOICES, configuredVoice);
   if (isQwenAudioRealtimeModel(model)) return QWEN_AUDIO_REALTIME_VOICES.map(cloneVoice);
   if (isQwen35OmniRealtimeModel(model)) return QWEN35_OMNI_REALTIME_VOICES.map(cloneVoice);
-  if (model.toLowerCase().includes("qwen3-tts-instruct-flash-realtime")) {
+  if (normalized.includes("qwen3-tts-instruct-flash-realtime")) {
     return ensureConfiguredVoice(QWEN3_INSTRUCT_REALTIME_VOICES, configuredVoice);
   }
   return [{
@@ -153,6 +168,9 @@ export function resolveRequestedVoice(model: string, configuredVoice: string, re
 }
 
 export function defaultVoiceForModel(model: string): string {
+  const normalized = model.trim().toLowerCase();
+  if (normalized === "qwen-audio-3.0-tts-plus") return "longanlingxin";
+  if (normalized === "qwen-audio-3.0-tts-flash") return "longanhuan_v3.6";
   if (model === QWEN_AUDIO_REALTIME_PLUS || model === QWEN_AUDIO_REALTIME_FLASH) return "longanqian";
   if (isQwen35OmniRealtimeModel(model)) return "Tina";
   return "Cherry";
