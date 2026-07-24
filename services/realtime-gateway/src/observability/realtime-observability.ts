@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readdir, readFile, rename, stat, unlink, appendFile } from "node:fs/promises";
+import { appendFile, mkdir, readdir, readFile, rename, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { GitHubObservabilitySync } from "./github-observability-sync.js";
 import { OperationsControlStore } from "../operations/operations-control-store.js";
@@ -487,7 +487,9 @@ export class RealtimeObservabilityStore {
       .filter((name) => /^events-.*\.jsonl$/.test(name))
       .sort()
       .reverse();
-    for (const old of files.slice(5)) await unlink(join(dirname(this.filePath), old).catch(() => undefined);
+    for (const old of files.slice(5)) {
+      await unlink(join(dirname(this.filePath), old)).catch(() => undefined);
+    }
   }
 }
 
