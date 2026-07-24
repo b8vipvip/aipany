@@ -27,8 +27,16 @@ export class StreamingTextChunker {
     }
 
     while (this.buffer.length >= this.maxChars) {
-      const index = findSemanticCut(this.buffer, this.minChars, this.maxChars, false);
-      chunks.push(this.take(index > 0 ? index : findSafeFallbackCut(this.buffer, this.minChars, this.maxChars)));
+      let index = findSemanticCut(this.buffer, this.minChars, this.maxChars, false);
+      if (index <= 0) index = findSafeFallbackCut(this.buffer, this.minChars, this.maxChars);
+      if (index <= 0) {
+        // Prefer waiting for a quote/bracket to close rather than sending a
+        // broken spoken phrase. A 2x ceiling prevents unbounded buffering when
+        // a model never closes the structure.
+        if (this.buffer.length < this.maxChars * 2) break;
+        index = this.maxChars;
+      }
+      chunks.push(this.take(index));
       this.emittedFirstChunk = true;
     }
 
@@ -106,7 +114,7 @@ function findSafeFallbackCut(text: string, minChars: number, maxChars: number): 
     if (/[”’」』）)】\]}]/u.test(text[index] ?? "")) continue;
     return index;
   }
-  return limit;
+  return -1;
 }
 
 function findTrailingNaturalCut(text: string, minChars: number): number {
