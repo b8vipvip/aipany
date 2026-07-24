@@ -103,7 +103,9 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
 
   override close(): void {
     this.speculativeLlm?.cancel("session_closed");
-    QwenTtsRealtimeClient.cancelPrewarm(this.ttsConnectionConfig());
+    // The warm pool is shared by sessions with the same upstream configuration.
+    // Do not cancel a pooled idle socket from one session's close path; its TTL
+    // cleanup owns disposal and prevents cross-session interference.
     super.close();
   }
 
@@ -123,7 +125,7 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
     asr.on("speechStarted", () => {
       this.partialTracker.reset();
       this.speculativeLlm?.cancel("new_speech");
-      void QwenTtsRealtimeClient.prewarm(this.ttsConnectionConfig());
+      this.prewarmTts();
     });
     asr.on("partial", (result) => {
       this.partialTracker.observe(result.text);
@@ -131,7 +133,7 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
     });
     asr.on("speechStopped", () => {
       this.startSpeculation();
-      void QwenTtsRealtimeClient.prewarm(this.ttsConnectionConfig());
+      this.prewarmTts();
     });
   }
 
@@ -145,6 +147,12 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
       candidate.text,
       buildSpeculativeMessages(state.history, candidate.text),
     );
+  }
+
+  private prewarmTts(): void {
+    // Prewarm is an optimization only. DNS/TLS/upstream failures here must never
+    // surface as an unhandled rejection or affect the stable response path.
+    void QwenTtsRealtimeClient.prewarm(this.ttsConnectionConfig()).catch(() => undefined);
   }
 
   private syncOwnerFocusSpeakerAnalysisWait(): void {
