@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  classifyTtsInstructionStyle,
   isQwenAudioTtsModel,
   resolveTtsProtocol,
   resolveTtsWebSocketUrl,
@@ -26,4 +27,16 @@ test("legacy qwen realtime tts keeps model query protocol", () => {
     resolveTtsWebSocketUrl("wss://dashscope.aliyuncs.com/api-ws/v1/realtime", model),
     "wss://dashscope.aliyuncs.com/api-ws/v1/realtime?model=qwen3-tts-instruct-flash-realtime",
   );
+});
+
+test("tts observability classifies style without storing instruction text", () => {
+  assert.equal(
+    classifyTtsInstructionStyle("用温暖、轻柔、真诚、有陪伴感的方式说话。"),
+    "warm_support",
+  );
+  assert.equal(
+    classifyTtsInstructionStyle("自然开心、轻快、带一点真实笑意。"),
+    "bright_playful",
+  );
+  assert.equal(classifyTtsInstructionStyle(""), "none");
 });
