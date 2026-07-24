@@ -70,6 +70,7 @@ interface BoundaryCandidate {
 
 const SENTENCE_PUNCTUATION = /[。！？!?；;\n]/u;
 const CLAUSE_PUNCTUATION = /[，,、：:]/u;
+const CLOSING_STRUCTURE = /[”’」』）)】\]}]/u;
 const SEMANTIC_TRANSITION = /^(?:但是|不过|可是|所以|因此|然后|后来|接着|而且|另外|同时|其实|反过来|换句话说|至于|总之|最后|第一|第二|第三|首先|其次|再者)/u;
 
 function findSemanticCut(text: string, minChars: number, maxChars: number, firstChunk: boolean): number {
@@ -111,8 +112,23 @@ function findSafeFallbackCut(text: string, minChars: number, maxChars: number): 
   for (let index = limit; index >= minChars; index -= 1) {
     if (!isSafeBoundary(text, index)) continue;
     // Avoid leaving a closing mark at the beginning of the next audio phrase.
-    if (/[”’」』）)】\]}]/u.test(text[index] ?? "")) continue;
+    if (CLOSING_STRUCTURE.test(text[index] ?? "")) continue;
     return index;
+  }
+
+  // If the target falls inside a quote/bracket, wait a little beyond the target
+  // for the nearest natural closure instead of cutting the structure in half.
+  const forwardLimit = Math.min(text.length, maxChars * 2 - 1);
+  for (let index = limit + 1; index <= forwardLimit; index += 1) {
+    if (!isSafeBoundary(text, index)) continue;
+    const previous = text[index - 1] ?? "";
+    const following = text.slice(index).trimStart();
+    if (CLOSING_STRUCTURE.test(previous)
+      || SENTENCE_PUNCTUATION.test(previous)
+      || CLAUSE_PUNCTUATION.test(previous)
+      || SEMANTIC_TRANSITION.test(following)) {
+      return index;
+    }
   }
   return -1;
 }
