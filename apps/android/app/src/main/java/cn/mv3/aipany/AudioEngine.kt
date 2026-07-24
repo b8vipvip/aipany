@@ -63,6 +63,13 @@ class AudioEngine(
         onLevel = onLevel,
     )
 
+    init {
+        ClientAudioControlBus.attach(
+            onAssistantSpeaking = { setAssistantSpeaking(it) },
+            onInterruptPlayback = { interruptPlayback() },
+        )
+    }
+
     fun updatePreferences(settings: AppSettings) {
         bargeInEnabled = settings.bargeInEnabled
         endpointDetector.setProfile(settings.endpointProfile)
@@ -245,6 +252,7 @@ class AudioEngine(
         if (released) return
         stop()
         released = true
+        ClientAudioControlBus.detach()
         captureExecutor.shutdownNow()
         playbackExecutor.shutdownNow()
     }
