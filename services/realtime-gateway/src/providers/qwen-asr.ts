@@ -2,6 +2,8 @@ import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import WebSocket from "ws";
 import type { UserEmotion } from "@aipany/protocol";
+import { recordGlobalRealtimeEvent } from "../observability/global-observability.js";
+import { AsrCommitGuard } from "./asr-commit-guard.js";
 
 export interface QwenAsrConfig {
   apiKey: string;
@@ -34,6 +36,8 @@ interface QwenAsrEvents {
 export class QwenAsrRealtimeClient extends EventEmitter<QwenAsrEvents> {
   private ws?: WebSocket;
   private ready = false;
+  private readonly commitGuard = new AsrCommitGuard();
+  private readonly traceId = randomUUID();
 
   constructor(private readonly config: QwenAsrConfig) {
     super();
@@ -59,6 +63,7 @@ export class QwenAsrRealtimeClient extends EventEmitter<QwenAsrEvents> {
       this.ws = ws;
 
       const fail = (error: Error) => {
+        this.commitGuard.resolve();
         if (!settled) {
           settled = true;
           reject(error);
@@ -93,6 +98,7 @@ export class QwenAsrRealtimeClient extends EventEmitter<QwenAsrEvents> {
 
           if (type === "session.updated") {
             this.ready = true;
+            this.commitGuard.reset();
             if (!settled) {
               settled = true;
               resolve();
@@ -102,6 +108,7 @@ export class QwenAsrRealtimeClient extends EventEmitter<QwenAsrEvents> {
           }
 
           if (type === "input_audio_buffer.speech_started") {
+            this.commitGuard.markServerSpeechStarted();
             this.emit("speechStarted");
             return;
           }
@@ -114,8 +121,10 @@ export class QwenAsrRealtimeClient extends EventEmitter<QwenAsrEvents> {
           if (type === "conversation.item.input_audio_transcription.text") {
             const text = typeof event.text === "string" ? event.text : "";
             const stash = typeof event.stash === "string" ? event.stash : "";
+            const combined = `${text}${stash}`;
+            this.commitGuard.markPartial(combined);
             this.emit("partial", {
-              text: `${text}${stash}`,
+              text: combined,
               emotion: normalizeEmotion(event.emotion),
               language: typeof event.language === "string" ? event.language : undefined,
             });
@@ -123,6 +132,7 @@ export class QwenAsrRealtimeClient extends EventEmitter<QwenAsrEvents> {
           }
 
           if (type === "conversation.item.input_audio_transcription.completed") {
+            this.commitGuard.resolve();
             this.emit("final", {
               text: typeof event.transcript === "string" ? event.transcript.trim() : "",
               emotion: normalizeEmotion(event.emotion),
@@ -150,6 +160,7 @@ export class QwenAsrRealtimeClient extends EventEmitter<QwenAsrEvents> {
       ws.on("close", () => {
         this.ready = false;
         this.ws = undefined;
+        this.commitGuard.reset();
         if (!settled) {
           settled = true;
           reject(new Error("千问 ASR WebSocket 在初始化完成前关闭"));
@@ -161,6 +172,7 @@ export class QwenAsrRealtimeClient extends EventEmitter<QwenAsrEvents> {
 
   appendAudio(audio: Buffer): void {
     if (!this.ready) return;
+    this.commitGuard.observeAudio(audio);
     this.send({
       event_id: randomUUID(),
       type: "input_audio_buffer.append",
@@ -168,9 +180,27 @@ export class QwenAsrRealtimeClient extends EventEmitter<QwenAsrEvents> {
     });
   }
 
-  commit(): void {
-    if (!this.ready) return;
+  commit(): boolean {
+    if (!this.ready) return false;
+    const decision = this.commitGuard.tryCommit();
+    if (!decision.allowed) {
+      recordGlobalRealtimeEvent({
+        level: "info",
+        category: "asr",
+        event: "asr.commit.suppressed",
+        engine: "cascaded",
+        data: {
+          traceId: this.traceId,
+          model: this.config.model,
+          reason: decision.reason,
+          speechLikeMs: decision.speechLikeMs,
+          serverSpeechEvidence: decision.serverSpeechEvidence,
+        },
+      });
+      return false;
+    }
     this.send({ event_id: randomUUID(), type: "input_audio_buffer.commit" });
+    return true;
   }
 
   finish(): void {
@@ -182,6 +212,7 @@ export class QwenAsrRealtimeClient extends EventEmitter<QwenAsrEvents> {
     const ws = this.ws;
     this.ws = undefined;
     this.ready = false;
+    this.commitGuard.reset();
     if (!ws) return;
     if (ws.readyState === WebSocket.OPEN) {
       try {
