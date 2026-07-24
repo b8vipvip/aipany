@@ -29,6 +29,7 @@ class AudioEngine(
         const val INPUT_SAMPLE_RATE = 16_000
         const val OUTPUT_SAMPLE_RATE = 24_000
         private const val FRAME_SAMPLES = 320
+        private const val OUTPUT_WRITE_CHUNK_BYTES = 1_920 // 40 ms PCM16 mono at 24 kHz
     }
 
     data class EffectsStatus(
@@ -55,10 +56,7 @@ class AudioEngine(
     private var automaticGainControl: AutomaticGainControl? = null
 
     private val endpointDetector = EndpointDetector(
-        onSpeechStarted = {
-            if (assistantSpeaking && bargeInEnabled) interruptPlayback()
-            onLocalSpeechStarted()
-        },
+        onSpeechStarted = onLocalSpeechStarted,
         onEndpointDetected = onEndpointDetected,
         onLevel = onLevel,
     )
@@ -122,7 +120,7 @@ class AudioEngine(
                     .build(),
             )
             .setAudioFormat(outputFormat)
-            .setBufferSizeInBytes(maxOf(outputMinBuffer * 2, OUTPUT_SAMPLE_RATE * 2 / 5))
+            .setBufferSizeInBytes(maxOf(outputMinBuffer, OUTPUT_SAMPLE_RATE * 2 / 6))
             .setTransferMode(AudioTrack.MODE_STREAM)
             .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
             .build()
@@ -172,21 +170,29 @@ class AudioEngine(
         if (released || audio.isEmpty()) return
         val generation = playbackGeneration.get()
         playbackExecutor.execute {
-            if (generation != playbackGeneration.get()) return@execute
-            val track = synchronized(playbackLock) {
-                if (generation != playbackGeneration.get()) return@synchronized null
-                audioTrack?.takeIf { it.state == AudioTrack.STATE_INITIALIZED }
-            } ?: return@execute
-            if (generation != playbackGeneration.get()) return@execute
-            try {
-                if (track.playState != AudioTrack.PLAYSTATE_PLAYING) track.play()
-                val written = track.write(audio, 0, audio.size, AudioTrack.WRITE_BLOCKING)
-                if (written > 0 && generation == playbackGeneration.get() && playbackStartedGeneration != generation) {
-                    playbackStartedGeneration = generation
-                    onPlaybackStarted()
+            var offset = 0
+            while (offset < audio.size && generation == playbackGeneration.get()) {
+                var notifyStarted = false
+                val written = synchronized(playbackLock) {
+                    if (generation != playbackGeneration.get()) return@synchronized -1
+                    val track = audioTrack?.takeIf { it.state == AudioTrack.STATE_INITIALIZED }
+                        ?: return@synchronized -1
+                    try {
+                        if (track.playState != AudioTrack.PLAYSTATE_PLAYING) track.play()
+                        val length = minOf(OUTPUT_WRITE_CHUNK_BYTES, audio.size - offset)
+                        val count = track.write(audio, offset, length, AudioTrack.WRITE_BLOCKING)
+                        if (count > 0 && generation == playbackGeneration.get() && playbackStartedGeneration != generation) {
+                            playbackStartedGeneration = generation
+                            notifyStarted = true
+                        }
+                        count
+                    } catch (_: IllegalStateException) {
+                        -1
+                    }
                 }
-            } catch (_: IllegalStateException) {
-                // Playback may be interrupted or recreated while this chunk is queued.
+                if (written <= 0 || generation != playbackGeneration.get()) return@execute
+                offset += written
+                if (notifyStarted) onPlaybackStarted()
             }
         }
     }
