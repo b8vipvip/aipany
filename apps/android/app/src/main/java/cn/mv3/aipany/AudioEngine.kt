@@ -153,6 +153,7 @@ class AudioEngine(
     }
 
     fun setAssistantSpeaking(value: Boolean) {
+        if (value && !assistantSpeaking) playbackStartedGeneration = Long.MIN_VALUE
         assistantSpeaking = value
     }
 
