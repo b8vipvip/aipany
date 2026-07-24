@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFile, mkdir, readFile, readdir, rename, stat, unlink } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, stat, unlink, appendFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { GitHubObservabilitySync } from "./github-observability-sync.js";
+import { OperationsControlStore } from "../operations/operations-control-store.js";
+import { scoreRealtimeSessionQuality, type SessionQualitySummary } from "./session-quality.js";
 
 export type RealtimeEngine = "cascaded" | "omni_realtime";
-export type ObservabilityLevel = "info" | "warn" | "error";
+export type ObservabilityLevel = "debug" | "info" | "warn" | "error";
 
 export interface ObservabilityEvent {
   id: string;
@@ -15,55 +17,72 @@ export interface ObservabilityEvent {
   sessionId?: string;
   connectionId?: string;
   engine?: RealtimeEngine;
-  tenantId?: string;
-  userId?: string;
-  deviceIdHash?: string;
+  tenantHash?: string;
+  userHash?: string;
+  deviceHash?: string;
+  deviceType?: string;
+  platform?: string;
+  appVersion?: string;
   data?: Record<string, unknown>;
 }
 
 export interface TurnLatencySample {
   speechEndToTranscriptFinalMs?: number;
+  transcriptFinalToResponseCreatedMs?: number;
   transcriptFinalToFirstTextMs?: number;
   firstTextToFirstAudioMs?: number;
-  speechEndToFirstAudioMs?: number;
   responseCreatedToFirstAudioMs?: number;
+  speechEndToFirstAudioMs?: number;
+  gatewayFirstAudioToClientReceiveMs?: number;
+  clientReceiveToPlaybackStartMs?: number;
+  responseCreatedToPlaybackStartMs?: number;
+  speechEndToPlaybackStartMs?: number;
 }
 
 export interface SessionReport {
   sessionId: string;
   connectionId: string;
   engine: RealtimeEngine;
-  tenantId?: string;
-  userId?: string;
-  deviceIdHash?: string;
-  deviceType?: string;
-  platform?: string;
-  appVersion?: string;
   startedAt: number;
   endedAt?: number;
   durationMs?: number;
+  tenantHash?: string;
+  userHash?: string;
+  deviceHash?: string;
+  deviceType?: string;
+  platform?: string;
+  appVersion?: string;
+  remoteAddress?: string;
+  userAgent?: string;
   closeCode?: number;
   closeReason?: string;
-  abnormalDisconnect: boolean;
-  reconnectLikely: boolean;
-  turns: number;
+  abnormalDisconnect?: boolean;
+  reconnectLikely?: boolean;
   interruptions: number;
   errors: number;
-  lastActivityAt: number;
-  lastEvent: string;
+  turns: number;
   latency: TurnLatencySample[];
+  quality?: SessionQualitySummary;
+}
+
+interface LatencyClock {
+  speechStoppedAt?: number;
+  transcriptFinalAt?: number;
+  responseCreatedAt?: number;
+  firstTextAt?: number;
+  firstAudioAt?: number;
 }
 
 interface SessionClock {
-  speechEndedAt?: number;
-  transcriptFinalAt?: number;
-  firstTextAt?: number;
-  responseCreatedAt?: number;
-  firstAudioAt?: number;
-  currentLatency?: TurnLatencySample;
+  currentLatency?: LatencyClock;
+  lastLatency?: TurnLatencySample;
+  lastFirstAudioAt?: number;
+  lastFirstAudioReceivedAt?: number;
+  lastSpeechStoppedAt?: number;
+  lastResponseCreatedAt?: number;
 }
 
-export interface SessionObservabilityMeta {
+interface BeginSessionInput {
   sessionId: string;
   connectionId: string;
   engine: RealtimeEngine;
@@ -92,46 +111,10 @@ export class SessionObservability {
     level: ObservabilityLevel = "info",
     category = "realtime",
   ): void {
-    const now = Date.now();
-    this.report.lastActivityAt = now;
-    this.report.lastEvent = event;
-
-    if (event === "speech.stopped") {
-      this.clock.speechEndedAt = now;
-      this.clock.currentLatency = {};
-    } else if (event === "transcript.final") {
-      this.clock.transcriptFinalAt = now;
-      this.report.turns += 1;
-      if (this.clock.speechEndedAt) {
-        this.currentLatency().speechEndToTranscriptFinalMs = now - this.clock.speechEndedAt;
-      }
-    } else if (event === "response.created") {
-      this.clock.responseCreatedAt = now;
-      this.clock.firstTextAt = undefined;
-      this.clock.firstAudioAt = undefined;
-    } else if (event === "response.first_text" && !this.clock.firstTextAt) {
-      this.clock.firstTextAt = now;
-      if (this.clock.transcriptFinalAt) {
-        this.currentLatency().transcriptFinalToFirstTextMs = now - this.clock.transcriptFinalAt;
-      }
-    } else if (event === "response.first_audio" && !this.clock.firstAudioAt) {
-      this.clock.firstAudioAt = now;
-      if (this.clock.firstTextAt) {
-        this.currentLatency().firstTextToFirstAudioMs = now - this.clock.firstTextAt;
-      }
-      if (this.clock.speechEndedAt) {
-        this.currentLatency().speechEndToFirstAudioMs = now - this.clock.speechEndedAt;
-      }
-      if (this.clock.responseCreatedAt) {
-        this.currentLatency().responseCreatedToFirstAudioMs = now - this.clock.responseCreatedAt;
-      }
-      this.flushLatency();
-    } else if (event === "response.interrupted") {
-      this.report.interruptions += 1;
-    } else if (level === "error" || event.endsWith(".error")) {
-      this.report.errors += 1;
-    }
-
+    if (level === "error") this.report.errors += 1;
+    if (event === "response.interrupted" || event === "client.barge_in_detected") this.report.interruptions += 1;
+    if (event === "transcript.final") this.report.turns += 1;
+    this.updateLatency(event);
     this.store.record({
       level,
       category,
@@ -139,58 +122,143 @@ export class SessionObservability {
       sessionId: this.report.sessionId,
       connectionId: this.report.connectionId,
       engine: this.report.engine,
-      tenantId: this.report.tenantId,
-      userId: this.report.userId,
-      deviceIdHash: this.report.deviceIdHash,
+      tenantHash: this.report.tenantHash,
+      userHash: this.report.userHash,
+      deviceHash: this.report.deviceHash,
+      deviceType: this.report.deviceType,
+      platform: this.report.platform,
+      appVersion: this.report.appVersion,
       data,
     });
   }
 
-  end(code?: number, reason?: string): void {
+  end(closeCode?: number, closeReason?: string): void {
     if (this.ended) return;
     this.ended = true;
-    this.flushLatency();
     const now = Date.now();
     this.report.endedAt = now;
     this.report.durationMs = now - this.report.startedAt;
-    this.report.closeCode = code;
-    this.report.closeReason = reason;
-    this.report.abnormalDisconnect = code !== undefined && code !== 1000 && code !== 1001;
-    this.report.lastActivityAt = now;
-    this.report.lastEvent = "session.ended";
-    this.store.finishSession(this.report);
+    this.report.closeCode = closeCode;
+    this.report.closeReason = closeReason;
+    this.report.abnormalDisconnect = closeCode !== undefined && closeCode !== 1000;
+    this.report.reconnectLikely = Boolean(
+      this.report.abnormalDisconnect
+      || closeCode === 1001
+      || /network|timeout|upstream|reconnect|reset|closed/i.test(closeReason ?? ""),
+    );
+    this.flushLatency();
+    this.report.quality = scoreRealtimeSessionQuality(this.report);
+    this.store.record({
+      level: "info",
+      category: "quality",
+      event: "session.quality_summary",
+      sessionId: this.report.sessionId,
+      connectionId: this.report.connectionId,
+      engine: this.report.engine,
+      deviceType: this.report.deviceType,
+      platform: this.report.platform,
+      appVersion: this.report.appVersion,
+      data: { ...this.report.quality },
+    });
+    this.store.finishSession(this.report.sessionId);
     this.store.record({
       level: this.report.abnormalDisconnect ? "warn" : "info",
-      category: "connection",
+      category: "session",
       event: "session.ended",
       sessionId: this.report.sessionId,
       connectionId: this.report.connectionId,
       engine: this.report.engine,
-      tenantId: this.report.tenantId,
-      userId: this.report.userId,
-      deviceIdHash: this.report.deviceIdHash,
+      deviceType: this.report.deviceType,
+      platform: this.report.platform,
+      appVersion: this.report.appVersion,
       data: {
-        code,
-        reason: reason || "",
         durationMs: this.report.durationMs,
+        closeCode,
+        closeReason,
+        abnormalDisconnect: this.report.abnormalDisconnect,
+        reconnectLikely: this.report.reconnectLikely,
         turns: this.report.turns,
         interruptions: this.report.interruptions,
         errors: this.report.errors,
-        abnormalDisconnect: this.report.abnormalDisconnect,
+        qualityScore: this.report.quality.score,
+        qualityGrade: this.report.quality.grade,
       },
     });
   }
 
-  private currentLatency(): TurnLatencySample {
-    this.clock.currentLatency ??= {};
-    return this.clock.currentLatency;
+  private updateLatency(event: string): void {
+    const now = Date.now();
+    switch (event) {
+      case "speech.stopped":
+        this.flushLatency();
+        this.clock.currentLatency = { speechStoppedAt: now };
+        this.clock.lastLatency = undefined;
+        this.clock.lastFirstAudioAt = undefined;
+        this.clock.lastFirstAudioReceivedAt = undefined;
+        this.clock.lastSpeechStoppedAt = now;
+        this.clock.lastResponseCreatedAt = undefined;
+        break;
+      case "transcript.final":
+        this.clock.currentLatency ??= {};
+        this.clock.currentLatency.transcriptFinalAt = now;
+        break;
+      case "response.created":
+        this.clock.currentLatency ??= {};
+        this.clock.currentLatency.responseCreatedAt = now;
+        this.clock.lastResponseCreatedAt = now;
+        break;
+      case "response.first_text":
+        this.clock.currentLatency ??= {};
+        this.clock.currentLatency.firstTextAt ??= now;
+        break;
+      case "response.first_audio":
+        this.clock.currentLatency ??= {};
+        this.clock.currentLatency.firstAudioAt ??= now;
+        this.flushLatency();
+        break;
+      case "client.first_audio_received":
+        this.clock.lastFirstAudioReceivedAt = now;
+        if (this.clock.lastLatency && this.clock.lastFirstAudioAt !== undefined) {
+          this.clock.lastLatency.gatewayFirstAudioToClientReceiveMs = Math.max(0, now - this.clock.lastFirstAudioAt);
+        }
+        break;
+      case "client.playback_started":
+      case "client.first_audio_rendered":
+        if (this.clock.lastLatency) {
+          if (this.clock.lastFirstAudioReceivedAt !== undefined) {
+            this.clock.lastLatency.clientReceiveToPlaybackStartMs = Math.max(0, now - this.clock.lastFirstAudioReceivedAt);
+          }
+          if (this.clock.lastSpeechStoppedAt !== undefined) {
+            this.clock.lastLatency.speechEndToPlaybackStartMs = Math.max(0, now - this.clock.lastSpeechStoppedAt);
+          }
+          if (this.clock.lastResponseCreatedAt !== undefined) {
+            this.clock.lastLatency.responseCreatedToPlaybackStartMs = Math.max(0, now - this.clock.lastResponseCreatedAt);
+          }
+        }
+        break;
+      default:
+        break;
+    }
   }
 
   private flushLatency(): void {
-    const sample = this.clock.currentLatency;
-    if (!sample || Object.keys(sample).length === 0) return;
-    this.report.latency.push({ ...sample });
-    if (this.report.latency.length > 50) this.report.latency.splice(0, this.report.latency.length - 50);
+    const item = this.clock.currentLatency;
+    if (!item) return;
+    if (!item.firstAudioAt && !item.transcriptFinalAt && !item.responseCreatedAt) return;
+    const sample: TurnLatencySample = {
+      speechEndToTranscriptFinalMs: diff(item.speechStoppedAt, item.transcriptFinalAt),
+      transcriptFinalToResponseCreatedMs: diff(item.transcriptFinalAt, item.responseCreatedAt),
+      transcriptFinalToFirstTextMs: diff(item.transcriptFinalAt, item.firstTextAt),
+      firstTextToFirstAudioMs: diff(item.firstTextAt, item.firstAudioAt),
+      responseCreatedToFirstAudioMs: diff(item.responseCreatedAt, item.firstAudioAt),
+      speechEndToFirstAudioMs: diff(item.speechStoppedAt, item.firstAudioAt),
+    };
+    this.report.latency.push(sample);
+    if (this.report.latency.length > 200) this.report.latency.shift();
+    this.clock.lastLatency = sample;
+    this.clock.lastFirstAudioAt = item.firstAudioAt;
+    this.clock.lastSpeechStoppedAt = item.speechStoppedAt ?? this.clock.lastSpeechStoppedAt;
+    this.clock.lastResponseCreatedAt = item.responseCreatedAt ?? this.clock.lastResponseCreatedAt;
     this.clock.currentLatency = undefined;
   }
 }
@@ -202,133 +270,145 @@ export class RealtimeObservabilityStore {
   private readonly maxFileBytes: number;
   private readonly events: ObservabilityEvent[] = [];
   private readonly sessions = new Map<string, SessionReport>();
-  private readonly activeSessions = new Map<string, SessionReport>();
+  private readonly activeSessions = new Set<string>();
   private readonly lastDeviceSession = new Map<string, number>();
+  private readonly startedAt = Date.now();
   private readonly githubSync: GitHubObservabilitySync;
-  private writeQueue: Promise<void> = Promise.resolve();
   private approximateBytes = 0;
-  private startedAt = Date.now();
+  private writeChain: Promise<void> = Promise.resolve();
 
-  constructor(options: {
-    filePath?: string;
-    maxEvents?: number;
-    maxSessions?: number;
-    maxFileBytes?: number;
-    githubSync?: GitHubObservabilitySync;
-  } = {}) {
-    this.filePath = options.filePath?.trim() || process.env.AIPANY_OBSERVABILITY_PATH?.trim() || "/data/observability/events.jsonl";
-    this.maxEvents = options.maxEvents ?? 5000;
-    this.maxSessions = options.maxSessions ?? 1000;
-    this.maxFileBytes = options.maxFileBytes ?? 20 * 1024 * 1024;
-    this.githubSync = options.githubSync ?? new GitHubObservabilitySync();
+  constructor(options: { filePath?: string; maxEvents?: number; maxSessions?: number; maxFileBytes?: number } = {}) {
+    this.filePath = options.filePath?.trim() || process.env.AIPANY_OBSERVABILITY_FILE?.trim() || "/data/observability/events.jsonl";
+    this.maxEvents = options.maxEvents ?? 10_000;
+    this.maxSessions = options.maxSessions ?? 2_000;
+    this.maxFileBytes = options.maxFileBytes ?? 50 * 1024 * 1024;
+    this.githubSync = new GitHubObservabilitySync({
+      loadConfig: async () => {
+        const operations = new OperationsControlStore({ filePath: process.env.AIPANY_OPERATIONS_CONTROL_PATH });
+        await operations.load();
+        return operations.getGitHubObservabilityConfig();
+      },
+    });
   }
 
   async load(): Promise<void> {
-    await mkdir(dirname(this.filePath), { recursive: true });
     try {
-      const info = await stat(this.filePath);
-      this.approximateBytes = info.size;
       const content = await readFile(this.filePath, "utf8");
       const lines = content.split("\n").filter(Boolean).slice(-this.maxEvents);
       for (const line of lines) {
         try {
-          const event = JSON.parse(line) as ObservabilityEvent;
-          if (event && typeof event.event === "string" && typeof event.timestamp === "number") this.events.push(event);
+          const parsed = JSON.parse(line) as ObservabilityEvent;
+          if (parsed && parsed.id && parsed.event) this.events.push(parsed);
         } catch {
-          // Ignore damaged trailing lines. New records remain append-only and valid.
+          // Ignore malformed historical lines and keep serving the operator UI.
         }
       }
+      this.approximateBytes = Buffer.byteLength(content);
     } catch (error) {
       if (!(error && typeof error === "object" && "code" in error && (error as { code?: string }).code === "ENOENT")) throw error;
     }
   }
 
-  beginSession(meta: SessionObservabilityMeta): SessionObservability {
+  beginSession(input: BeginSessionInput): SessionObservability {
     const now = Date.now();
-    const deviceIdHash = meta.deviceId ? hashIdentifier(meta.deviceId) : undefined;
-    const previousEndedAt = deviceIdHash ? this.lastDeviceSession.get(deviceIdHash) : undefined;
     const report: SessionReport = {
-      sessionId: meta.sessionId,
-      connectionId: meta.connectionId,
-      engine: meta.engine,
-      tenantId: meta.tenantId,
-      userId: meta.userId,
-      deviceIdHash,
-      deviceType: meta.deviceType,
-      platform: meta.platform,
-      appVersion: meta.appVersion,
+      sessionId: input.sessionId,
+      connectionId: input.connectionId,
+      engine: input.engine,
       startedAt: now,
-      abnormalDisconnect: false,
-      reconnectLikely: previousEndedAt !== undefined && now - previousEndedAt < 60_000,
-      turns: 0,
+      tenantHash: input.tenantId ? hashIdentifier(input.tenantId) : undefined,
+      userHash: input.userId ? hashIdentifier(input.userId) : undefined,
+      deviceHash: input.deviceId ? hashIdentifier(input.deviceId) : undefined,
+      deviceType: input.deviceType,
+      platform: input.platform,
+      appVersion: input.appVersion,
+      remoteAddress: input.remoteAddress,
+      userAgent: input.userAgent,
       interruptions: 0,
       errors: 0,
-      lastActivityAt: now,
-      lastEvent: "session.started",
+      turns: 0,
       latency: [],
     };
+    if (report.deviceHash) {
+      const previous = this.lastDeviceSession.get(report.deviceHash);
+      report.reconnectLikely = previous !== undefined && now - previous < 90_000;
+      this.lastDeviceSession.set(report.deviceHash, now);
+    }
     this.sessions.set(report.sessionId, report);
-    this.activeSessions.set(report.sessionId, report);
+    this.activeSessions.add(report.sessionId);
     this.trimSessions();
     this.record({
       level: "info",
-      category: "connection",
+      category: "session",
       event: "session.started",
       sessionId: report.sessionId,
       connectionId: report.connectionId,
       engine: report.engine,
-      tenantId: report.tenantId,
-      userId: report.userId,
-      deviceIdHash,
+      tenantHash: report.tenantHash,
+      userHash: report.userHash,
+      deviceHash: report.deviceHash,
+      deviceType: report.deviceType,
+      platform: report.platform,
+      appVersion: report.appVersion,
       data: {
-        deviceType: report.deviceType,
-        platform: report.platform,
-        appVersion: report.appVersion,
         reconnectLikely: report.reconnectLikely,
-        remoteAddress: meta.remoteAddress,
-        userAgent: meta.userAgent,
+        remoteAddress: report.remoteAddress,
+        userAgent: report.userAgent,
       },
     });
     return new SessionObservability(this, report);
   }
 
-  finishSession(report: SessionReport): void {
-    this.activeSessions.delete(report.sessionId);
-    this.sessions.set(report.sessionId, report);
-    if (report.deviceIdHash && report.endedAt) this.lastDeviceSession.set(report.deviceIdHash, report.endedAt);
-    this.trimSessions();
+  finishSession(sessionId: string): void {
+    this.activeSessions.delete(sessionId);
   }
 
   record(input: Omit<ObservabilityEvent, "id" | "timestamp"> & { timestamp?: number }): void {
     const event: ObservabilityEvent = {
-      ...input,
       id: randomUUID(),
       timestamp: input.timestamp ?? Date.now(),
+      level: input.level,
+      category: input.category,
+      event: input.event,
+      sessionId: input.sessionId,
+      connectionId: input.connectionId,
+      engine: input.engine,
+      tenantHash: input.tenantHash,
+      userHash: input.userHash,
+      deviceHash: input.deviceHash,
+      deviceType: input.deviceType,
+      platform: input.platform,
+      appVersion: input.appVersion,
+      data: input.data,
     };
     this.events.push(event);
-    this.githubSync.enqueue(event);
     if (this.events.length > this.maxEvents) this.events.splice(0, this.events.length - this.maxEvents);
+    this.githubSync.record(event);
     const line = `${JSON.stringify(event)}\n`;
     this.approximateBytes += Buffer.byteLength(line);
-    this.writeQueue = this.writeQueue
-      .then(async () => {
-        await mkdir(dirname(this.filePath), { recursive: true });
-        if (this.approximateBytes >= this.maxFileBytes) await this.rotate();
-        await appendFile(this.filePath, line, { encoding: "utf8", mode: 0o600 });
-      })
-      .catch(() => undefined);
+    this.writeChain = this.writeChain.then(async () => {
+      await mkdir(dirname(this.filePath), { recursive: true });
+      if (this.approximateBytes >= this.maxFileBytes) await this.rotate();
+      await appendFile(this.filePath, line, { encoding: "utf8", mode: 0o600 });
+    }).catch((error) => console.error("[aipany] failed to write observability event", error));
   }
 
-  overview(windowMs = 24 * 60 * 60 * 1000) {
+  async flush(): Promise<void> {
+    await this.writeChain;
+  }
+
+  getOverview(windowMs = 60 * 60 * 1000) {
     const now = Date.now();
     const since = now - windowMs;
     const recentSessions = [...this.sessions.values()].filter((session) => session.startedAt >= since);
     const completed = recentSessions.filter((session) => session.endedAt !== undefined);
     const latency = recentSessions.flatMap((session) => session.latency);
     const firstAudio = latency.map((item) => item.speechEndToFirstAudioMs).filter(isFiniteNumber);
+    const playbackStart = latency.map((item) => item.speechEndToPlaybackStartMs).filter(isFiniteNumber);
     const transcript = latency.map((item) => item.speechEndToTranscriptFinalMs).filter(isFiniteNumber);
     const firstText = latency.map((item) => item.transcriptFinalToFirstTextMs).filter(isFiniteNumber);
     const tts = latency.map((item) => item.firstTextToFirstAudioMs).filter(isFiniteNumber);
+    const qualityScores = completed.map((session) => session.quality?.score).filter(isFiniteNumber);
     const recentEvents = this.events.filter((event) => event.timestamp >= since);
     return {
       generatedAt: now,
@@ -344,10 +424,12 @@ export class RealtimeObservabilityStore {
       engines: countBy(recentSessions.map((session) => session.engine)),
       latency: {
         speechEndToFirstAudio: summarize(firstAudio),
+        speechEndToPlaybackStart: summarize(playbackStart),
         speechEndToTranscriptFinal: summarize(transcript),
         transcriptFinalToFirstText: summarize(firstText),
         firstTextToFirstAudio: summarize(tts),
       },
+      quality: summarizeScore(qualityScores),
       process: {
         rssBytes: process.memoryUsage().rss,
         heapUsedBytes: process.memoryUsage().heapUsed,
@@ -361,7 +443,11 @@ export class RealtimeObservabilityStore {
     return [...this.sessions.values()]
       .sort((a, b) => b.startedAt - a.startedAt)
       .slice(0, Math.max(1, Math.min(500, limit)))
-      .map((session) => ({ ...session, latency: session.latency.map((item) => ({ ...item })) }));
+      .map((session) => ({
+        ...session,
+        latency: session.latency.map((item) => ({ ...item })),
+        quality: session.quality ? { ...session.quality } : undefined,
+      }));
   }
 
   listEvents(options: { limit?: number; level?: string; category?: string; sessionId?: string; query?: string } = {}): ObservabilityEvent[] {
@@ -401,7 +487,7 @@ export class RealtimeObservabilityStore {
       .filter((name) => /^events-.*\.jsonl$/.test(name))
       .sort()
       .reverse();
-    for (const old of files.slice(5)) await unlink(join(dirname(this.filePath), old)).catch(() => undefined);
+    for (const old of files.slice(5)) await unlink(join(dirname(this.filePath), old).catch(() => undefined);
   }
 }
 
@@ -422,6 +508,17 @@ function summarize(values: number[]) {
   };
 }
 
+function summarizeScore(values: number[]) {
+  if (!values.length) return { count: 0, averageScore: undefined, p50Score: undefined, p10Score: undefined };
+  const sorted = [...values].sort((a, b) => a - b);
+  return {
+    count: sorted.length,
+    averageScore: Math.round(sorted.reduce((sum, value) => sum + value, 0) / sorted.length),
+    p50Score: percentile(sorted, 0.5),
+    p10Score: percentile(sorted, 0.1),
+  };
+}
+
 function percentile(sorted: number[], ratio: number): number | undefined {
   if (!sorted.length) return undefined;
   return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * ratio) - 1))];
@@ -431,6 +528,11 @@ function countBy(values: string[]): Record<string, number> {
   const output: Record<string, number> = {};
   for (const value of values) output[value] = (output[value] ?? 0) + 1;
   return output;
+}
+
+function diff(start: number | undefined, end: number | undefined): number | undefined {
+  if (start === undefined || end === undefined || end < start) return undefined;
+  return end - start;
 }
 
 function isFiniteNumber(value: number | undefined): value is number {
