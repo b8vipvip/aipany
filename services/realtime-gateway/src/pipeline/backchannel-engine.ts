@@ -21,7 +21,7 @@ export interface BackchannelDecision {
  */
 export class BackchannelEngine {
   private speechStartedAt = 0;
-  private lastCueAt = 0;
+  private lastCueAt?: number;
   private cueSentThisTurn = false;
   private speechActive = false;
 
@@ -46,7 +46,8 @@ export class BackchannelEngine {
     const compact = text.replace(/\s+/g, "");
     if (!this.speechActive || this.cueSentThisTurn || input.activeResponse) return undefined;
     if (input.interactionMode === "group") return undefined;
-    if (now - this.speechStartedAt < this.minimumSpeechMs || now - this.lastCueAt < this.cooldownMs) return undefined;
+    if (now - this.speechStartedAt < this.minimumSpeechMs) return undefined;
+    if (this.lastCueAt !== undefined && now - this.lastCueAt < this.cooldownMs) return undefined;
     if (compact.length < 24 || /[。！？!?]$/u.test(compact)) return undefined;
     if (isSensitive(compact, input.emotion)) return undefined;
     if (!hasNarrativeContinuation(compact)) return undefined;
