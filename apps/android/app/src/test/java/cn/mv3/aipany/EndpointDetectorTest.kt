@@ -45,6 +45,23 @@ class EndpointDetectorTest {
     }
 
     @Test
+    fun shortNoiseBurstStartsLocallyButNeverCommits() {
+        var starts = 0
+        var endpoints = 0
+        val detector = EndpointDetector(
+            onSpeechStarted = { starts++ },
+            onEndpointDetected = { endpoints++ },
+            onLevel = { _, _, _ -> },
+        )
+
+        repeat(3) { detector.process(frame(8_000), 320, false) }
+        repeat(30) { detector.process(frame(100), 320, false) }
+
+        assertEquals(1, starts)
+        assertEquals(0, endpoints)
+    }
+
+    @Test
     fun assistantPlaybackRejectsModerateEchoButAcceptsSustainedUserInterruption() {
         var starts = 0
         val detector = EndpointDetector(
