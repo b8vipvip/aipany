@@ -22,6 +22,8 @@ class AudioEngine(
     private val onLocalSpeechStarted: () -> Unit,
     private val onEndpointDetected: () -> Unit,
     private val onLevel: (Float, Float, Boolean) -> Unit,
+    private val onPlaybackStarted: () -> Unit = { ClientTelemetryBus.report("playback_started") },
+    private val onPlaybackStopCompleted: (Double) -> Unit = { ClientTelemetryBus.report("playback_stop_completed", it) },
 ) {
     companion object {
         const val INPUT_SAMPLE_RATE = 16_000
@@ -44,6 +46,7 @@ class AudioEngine(
     @Volatile private var released = false
     @Volatile private var assistantSpeaking = false
     @Volatile private var bargeInEnabled = true
+    @Volatile private var playbackStartedGeneration = Long.MIN_VALUE
 
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
@@ -121,6 +124,7 @@ class AudioEngine(
         audioRecord = record
         audioTrack = track
         playbackGeneration.incrementAndGet()
+        playbackStartedGeneration = Long.MIN_VALUE
         endpointDetector.reset()
         track.play()
         record.startRecording()
@@ -149,7 +153,12 @@ class AudioEngine(
     }
 
     fun setAssistantSpeaking(value: Boolean) {
+        if (value && !assistantSpeaking) playbackStartedGeneration = Long.MIN_VALUE
         assistantSpeaking = value
+    }
+
+    fun prepareForAssistantResponse() {
+        playbackStartedGeneration = Long.MIN_VALUE
     }
 
     fun playPcm(audio: ByteArray) {
@@ -164,7 +173,11 @@ class AudioEngine(
             if (generation != playbackGeneration.get()) return@execute
             try {
                 if (track.playState != AudioTrack.PLAYSTATE_PLAYING) track.play()
-                track.write(audio, 0, audio.size, AudioTrack.WRITE_BLOCKING)
+                val written = track.write(audio, 0, audio.size, AudioTrack.WRITE_BLOCKING)
+                if (written > 0 && generation == playbackGeneration.get() && playbackStartedGeneration != generation) {
+                    playbackStartedGeneration = generation
+                    onPlaybackStarted()
+                }
             } catch (_: IllegalStateException) {
                 // Playback may be interrupted or recreated while this chunk is queued.
             }
@@ -172,19 +185,22 @@ class AudioEngine(
     }
 
     fun interruptPlayback() {
-        // Invalidate queued chunks before touching AudioTrack so old PCM can never
-        // resume after the user interrupts the assistant.
+        val startedNs = System.nanoTime()
         playbackGeneration.incrementAndGet()
+        playbackStartedGeneration = Long.MIN_VALUE
         assistantSpeaking = false
         synchronized(playbackLock) {
-            val track = audioTrack ?: return
-            try {
-                track.pause()
-                track.flush()
-                track.play()
-            } catch (_: IllegalStateException) {
+            val track = audioTrack
+            if (track != null) {
+                try {
+                    track.pause()
+                    track.flush()
+                    track.play()
+                } catch (_: IllegalStateException) {
+                }
             }
         }
+        onPlaybackStopCompleted((System.nanoTime() - startedNs) / 1_000_000.0)
     }
 
     fun effectsStatus(): EffectsStatus = EffectsStatus(
@@ -197,6 +213,7 @@ class AudioEngine(
         if (!running && audioRecord == null && audioTrack == null) return
         running = false
         playbackGeneration.incrementAndGet()
+        playbackStartedGeneration = Long.MIN_VALUE
         endpointDetector.reset()
         assistantSpeaking = false
 

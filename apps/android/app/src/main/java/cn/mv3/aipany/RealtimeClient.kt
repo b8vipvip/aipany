@@ -53,9 +53,10 @@ class RealtimeClient(
     @Volatile private var reconnectAttempt = 0
     @Volatile private var reconnectFuture: ScheduledFuture<*>? = null
     @Volatile private var activeResponseId: String? = null
-    @Volatile private var firstAudioReported = false
+    @Volatile private var firstAudioReceivedReported = false
 
     init {
+        ClientTelemetryBus.attach { name, valueMs -> sendTelemetry(name, valueMs) }
         scheduler.scheduleAtFixedRate({ heartbeatTick() }, 8, 8, TimeUnit.SECONDS)
     }
 
@@ -94,7 +95,7 @@ class RealtimeClient(
                 lastPongAt = System.currentTimeMillis()
                 reconnectAttempt = 0
                 activeResponseId = null
-                firstAudioReported = false
+                firstAudioReceivedReported = false
                 onState("安全连接已建立，正在启动实时语音")
                 webSocket.send(
                     JSONObject()
@@ -148,11 +149,11 @@ class RealtimeClient(
                         }
                         "response.created" -> {
                             activeResponseId = event.optString("responseId").ifBlank { null }
-                            firstAudioReported = false
+                            firstAudioReceivedReported = false
                         }
                         "response.done", "response.interrupted" -> {
                             activeResponseId = null
-                            firstAudioReported = false
+                            firstAudioReceivedReported = false
                         }
                     }
                     onEvent(event)
@@ -163,9 +164,9 @@ class RealtimeClient(
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                 if (generation != connectionGeneration.get()) return
-                if (activeResponseId != null && !firstAudioReported) {
-                    firstAudioReported = true
-                    sendTelemetry("first_audio_rendered")
+                if (activeResponseId != null && !firstAudioReceivedReported) {
+                    firstAudioReceivedReported = true
+                    sendTelemetry("first_audio_received")
                 }
                 onAudio(bytes.toByteArray())
             }
@@ -234,6 +235,10 @@ class RealtimeClient(
         return sendControl("response.cancel")
     }
 
+    fun reportPlaybackStarted(valueMs: Double? = null): Boolean = sendTelemetry("playback_started", valueMs)
+
+    fun reportPlaybackStopCompleted(valueMs: Double? = null): Boolean = sendTelemetry("playback_stop_completed", valueMs)
+
     fun setInteractionMode(mode: String): Boolean {
         if (!connected) return false
         return socket?.send(JSONObject().put("type", "mode.set").put("mode", mode).toString()) == true
@@ -258,6 +263,7 @@ class RealtimeClient(
     }
 
     fun release() {
+        ClientTelemetryBus.detach()
         closeSilently(sendFinish = true, disableReconnect = true)
         scheduler.shutdownNow()
         httpClient.dispatcher.executorService.shutdown()
@@ -284,7 +290,7 @@ class RealtimeClient(
         connectionGeneration.incrementAndGet()
         connected = false
         activeResponseId = null
-        firstAudioReported = false
+        firstAudioReceivedReported = false
         val current = socket
         socket = null
         current?.let {
