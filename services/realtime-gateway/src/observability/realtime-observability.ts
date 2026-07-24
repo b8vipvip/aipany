@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFile, mkdir, readFile, readdir, rename, stat, unlink } from "node:fs/promises";
+import { appendFile, mkdir, readdir, readFile, rename, stat, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { GitHubObservabilitySync } from "./github-observability-sync.js";
+import { scoreRealtimeSessionQuality, type SessionQualitySummary } from "./session-quality.js";
 
 export type RealtimeEngine = "cascaded" | "omni_realtime";
 export type ObservabilityLevel = "info" | "warn" | "error";
@@ -27,6 +28,10 @@ export interface TurnLatencySample {
   firstTextToFirstAudioMs?: number;
   speechEndToFirstAudioMs?: number;
   responseCreatedToFirstAudioMs?: number;
+  gatewayFirstAudioToClientReceiveMs?: number;
+  clientReceiveToPlaybackStartMs?: number;
+  responseCreatedToPlaybackStartMs?: number;
+  speechEndToPlaybackStartMs?: number;
 }
 
 export interface SessionReport {
@@ -52,6 +57,7 @@ export interface SessionReport {
   lastActivityAt: number;
   lastEvent: string;
   latency: TurnLatencySample[];
+  quality?: SessionQualitySummary;
 }
 
 interface SessionClock {
@@ -61,6 +67,8 @@ interface SessionClock {
   responseCreatedAt?: number;
   firstAudioAt?: number;
   currentLatency?: TurnLatencySample;
+  lastLatency?: TurnLatencySample;
+  lastFirstAudioReceivedAt?: number;
 }
 
 export interface SessionObservabilityMeta {
@@ -99,6 +107,8 @@ export class SessionObservability {
     if (event === "speech.stopped") {
       this.clock.speechEndedAt = now;
       this.clock.currentLatency = {};
+      this.clock.lastLatency = undefined;
+      this.clock.lastFirstAudioReceivedAt = undefined;
     } else if (event === "transcript.final") {
       this.clock.transcriptFinalAt = now;
       this.report.turns += 1;
@@ -126,6 +136,23 @@ export class SessionObservability {
         this.currentLatency().responseCreatedToFirstAudioMs = now - this.clock.responseCreatedAt;
       }
       this.flushLatency();
+    } else if (event === "client.first_audio_received") {
+      this.clock.lastFirstAudioReceivedAt = now;
+      if (this.clock.lastLatency && this.clock.firstAudioAt) {
+        this.clock.lastLatency.gatewayFirstAudioToClientReceiveMs = Math.max(0, now - this.clock.firstAudioAt);
+      }
+    } else if (event === "client.playback_started" || event === "client.first_audio_rendered") {
+      if (this.clock.lastLatency) {
+        if (this.clock.lastFirstAudioReceivedAt) {
+          this.clock.lastLatency.clientReceiveToPlaybackStartMs = Math.max(0, now - this.clock.lastFirstAudioReceivedAt);
+        }
+        if (this.clock.speechEndedAt) {
+          this.clock.lastLatency.speechEndToPlaybackStartMs = Math.max(0, now - this.clock.speechEndedAt);
+        }
+        if (this.clock.responseCreatedAt) {
+          this.clock.lastLatency.responseCreatedToPlaybackStartMs = Math.max(0, now - this.clock.responseCreatedAt);
+        }
+      }
     } else if (event === "response.interrupted") {
       this.report.interruptions += 1;
     } else if (level === "error" || event.endsWith(".error")) {
@@ -158,6 +185,19 @@ export class SessionObservability {
     this.report.abnormalDisconnect = code !== undefined && code !== 1000 && code !== 1001;
     this.report.lastActivityAt = now;
     this.report.lastEvent = "session.ended";
+    this.report.quality = scoreRealtimeSessionQuality(this.report);
+    this.store.record({
+      level: "info",
+      category: "quality",
+      event: "session.quality_summary",
+      sessionId: this.report.sessionId,
+      connectionId: this.report.connectionId,
+      engine: this.report.engine,
+      tenantId: this.report.tenantId,
+      userId: this.report.userId,
+      deviceIdHash: this.report.deviceIdHash,
+      data: { ...this.report.quality },
+    });
     this.store.finishSession(this.report);
     this.store.record({
       level: this.report.abnormalDisconnect ? "warn" : "info",
@@ -177,6 +217,8 @@ export class SessionObservability {
         interruptions: this.report.interruptions,
         errors: this.report.errors,
         abnormalDisconnect: this.report.abnormalDisconnect,
+        qualityScore: this.report.quality.score,
+        qualityGrade: this.report.quality.grade,
       },
     });
   }
@@ -189,8 +231,10 @@ export class SessionObservability {
   private flushLatency(): void {
     const sample = this.clock.currentLatency;
     if (!sample || Object.keys(sample).length === 0) return;
-    this.report.latency.push({ ...sample });
+    const stored = { ...sample };
+    this.report.latency.push(stored);
     if (this.report.latency.length > 50) this.report.latency.splice(0, this.report.latency.length - 50);
+    this.clock.lastLatency = stored;
     this.clock.currentLatency = undefined;
   }
 }
@@ -326,9 +370,11 @@ export class RealtimeObservabilityStore {
     const completed = recentSessions.filter((session) => session.endedAt !== undefined);
     const latency = recentSessions.flatMap((session) => session.latency);
     const firstAudio = latency.map((item) => item.speechEndToFirstAudioMs).filter(isFiniteNumber);
+    const playbackStart = latency.map((item) => item.speechEndToPlaybackStartMs).filter(isFiniteNumber);
     const transcript = latency.map((item) => item.speechEndToTranscriptFinalMs).filter(isFiniteNumber);
     const firstText = latency.map((item) => item.transcriptFinalToFirstTextMs).filter(isFiniteNumber);
     const tts = latency.map((item) => item.firstTextToFirstAudioMs).filter(isFiniteNumber);
+    const qualityScores = completed.map((session) => session.quality?.score).filter(isFiniteNumber);
     const recentEvents = this.events.filter((event) => event.timestamp >= since);
     return {
       generatedAt: now,
@@ -344,10 +390,12 @@ export class RealtimeObservabilityStore {
       engines: countBy(recentSessions.map((session) => session.engine)),
       latency: {
         speechEndToFirstAudio: summarize(firstAudio),
+        speechEndToPlaybackStart: summarize(playbackStart),
         speechEndToTranscriptFinal: summarize(transcript),
         transcriptFinalToFirstText: summarize(firstText),
         firstTextToFirstAudio: summarize(tts),
       },
+      quality: summarizeScore(qualityScores),
       process: {
         rssBytes: process.memoryUsage().rss,
         heapUsedBytes: process.memoryUsage().heapUsed,
@@ -361,7 +409,11 @@ export class RealtimeObservabilityStore {
     return [...this.sessions.values()]
       .sort((a, b) => b.startedAt - a.startedAt)
       .slice(0, Math.max(1, Math.min(500, limit)))
-      .map((session) => ({ ...session, latency: session.latency.map((item) => ({ ...item })) }));
+      .map((session) => ({
+        ...session,
+        latency: session.latency.map((item) => ({ ...item })),
+        quality: session.quality ? { ...session.quality } : undefined,
+      }));
   }
 
   listEvents(options: { limit?: number; level?: string; category?: string; sessionId?: string; query?: string } = {}): ObservabilityEvent[] {
@@ -419,6 +471,17 @@ function summarize(values: number[]) {
     p50Ms: percentile(sorted, 0.5),
     p95Ms: percentile(sorted, 0.95),
     maxMs: sorted.at(-1),
+  };
+}
+
+function summarizeScore(values: number[]) {
+  if (!values.length) return { count: 0, averageScore: undefined, p50Score: undefined, p10Score: undefined };
+  const sorted = [...values].sort((a, b) => a - b);
+  return {
+    count: sorted.length,
+    averageScore: Math.round(sorted.reduce((sum, value) => sum + value, 0) / sorted.length),
+    p50Score: percentile(sorted, 0.5),
+    p10Score: percentile(sorted, 0.1),
   };
 }
 
