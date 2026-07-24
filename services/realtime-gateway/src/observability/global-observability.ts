@@ -10,6 +10,8 @@ export function recordGlobalRealtimeEvent(input: {
   level: ObservabilityLevel;
   category: string;
   event: string;
+  sessionId?: string;
+  connectionId?: string;
   engine?: "cascaded" | "omni_realtime";
   data?: Record<string, unknown>;
 }): void {
