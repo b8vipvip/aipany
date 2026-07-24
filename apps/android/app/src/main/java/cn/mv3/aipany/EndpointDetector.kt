@@ -9,18 +9,29 @@ import kotlin.math.sqrt
  * The active profile changes only the silence window; speech detection continues
  * to adapt to the local noise floor. During assistant playback it uses a stricter
  * echo-resistant start threshold, while platform AEC removes most speaker leakage.
+ *
+ * A short energy spike may be loud enough to trigger speech-start, but it is not
+ * allowed to produce a commit until at least 260 ms of voiced frames have been
+ * observed. This prevents coughs, speaker echo tails and tap noise from creating
+ * empty ASR commits.
  */
 class EndpointDetector(
     private val onSpeechStarted: () -> Unit,
     private val onEndpointDetected: () -> Unit,
     private val onLevel: (dbfs: Float, noiseFloorDbfs: Float, speaking: Boolean) -> Unit,
 ) {
+    companion object {
+        private const val MIN_VOICED_SPEECH_FRAMES = 13 // 260 ms at 20 ms/frame
+        private const val POST_ENDPOINT_COOLDOWN_FRAMES = 25 // 500 ms
+    }
+
     @Volatile private var profile: EndpointProfile = EndpointProfile.BALANCED
     private var noiseFloorDbfs = -52f
     private var speaking = false
     private var consecutiveSpeechFrames = 0
     private var silenceFrames = 0
     private var speechFrames = 0
+    private var voicedSpeechFrames = 0
     private var cooldownFrames = 0
     private var levelFrames = 0
 
@@ -62,13 +73,19 @@ class EndpointDetector(
             if (consecutiveSpeechFrames >= requiredStartFrames) {
                 speaking = true
                 speechFrames = consecutiveSpeechFrames
+                voicedSpeechFrames = consecutiveSpeechFrames
                 silenceFrames = 0
                 onSpeechStarted()
             }
         } else {
             speechFrames++
             val endThreshold = max(-52f, noiseFloorDbfs + 5f)
-            if (dbfs < endThreshold) silenceFrames++ else silenceFrames = 0
+            if (dbfs < endThreshold) {
+                silenceFrames++
+            } else {
+                silenceFrames = 0
+                voicedSpeechFrames++
+            }
 
             val activeProfile = profile
             val requiredSilenceFrames = when {
@@ -77,13 +94,15 @@ class EndpointDetector(
                 else -> activeProfile.shortSpeechSilenceFrames
             }
 
-            if (speechFrames >= 10 && silenceFrames >= requiredSilenceFrames) {
+            if (silenceFrames >= requiredSilenceFrames) {
+                val validUtterance = voicedSpeechFrames >= MIN_VOICED_SPEECH_FRAMES
                 speaking = false
                 consecutiveSpeechFrames = 0
                 silenceFrames = 0
                 speechFrames = 0
-                cooldownFrames = 10
-                onEndpointDetected()
+                voicedSpeechFrames = 0
+                cooldownFrames = POST_ENDPOINT_COOLDOWN_FRAMES
+                if (validUtterance) onEndpointDetected()
             }
         }
 
@@ -99,6 +118,7 @@ class EndpointDetector(
         consecutiveSpeechFrames = 0
         silenceFrames = 0
         speechFrames = 0
+        voicedSpeechFrames = 0
         cooldownFrames = 0
     }
 }

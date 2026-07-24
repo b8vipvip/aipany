@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import WebSocket from "ws";
+import { recordGlobalRealtimeEvent } from "../observability/global-observability.js";
 
 export interface QwenTtsConfig {
   apiKey: string;
@@ -426,6 +427,8 @@ export class QwenTtsRealtimeClient extends EventEmitter<QwenTtsEvents> {
   private transport?: BaseTtsTransport;
   private connectPromise?: Promise<void>;
   private finished = false;
+  private selectionRecorded = false;
+  private readonly traceId = randomUUID();
 
   constructor(
     private readonly config: QwenTtsConfig,
@@ -483,6 +486,7 @@ export class QwenTtsRealtimeClient extends EventEmitter<QwenTtsEvents> {
       } else {
         this.transport = createTransport(connection);
       }
+      this.recordSelection();
       this.transport.on("audio", (audio) => this.emit("audio", audio));
       this.transport.on("error", (error) => this.emit("error", error));
       this.transport.on("finished", () => {
@@ -507,9 +511,51 @@ export class QwenTtsRealtimeClient extends EventEmitter<QwenTtsEvents> {
 
   cancel(): void {
     if (this.finished) return;
+    const protocolFamily = resolveTtsProtocol(this.config.model);
+    recordGlobalRealtimeEvent({
+      level: "info",
+      category: "tts",
+      event: "tts.cancel.requested",
+      engine: "cascaded",
+      data: {
+        traceId: this.traceId,
+        model: this.config.model,
+        voice: this.config.voice,
+        protocolFamily,
+        cancelMethodRequested: protocolFamily === "dashscope_inference" ? "finish_task_cancel" : "socket_close",
+        transportCreated: Boolean(this.transport),
+      },
+    });
     this.finished = true;
     this.transport?.cancel();
     this.transport = undefined;
+  }
+
+  private recordSelection(): void {
+    if (this.selectionRecorded) return;
+    this.selectionRecorded = true;
+    const trimmedInstructions = this.instructions.trim();
+    recordGlobalRealtimeEvent({
+      level: "info",
+      category: "tts",
+      event: "tts.session.selected",
+      engine: "cascaded",
+      data: {
+        traceId: this.traceId,
+        model: this.config.model,
+        voice: this.config.voice,
+        protocolFamily: resolveTtsProtocol(this.config.model),
+        language: this.config.language,
+        sampleRate: this.config.sampleRate,
+        optimizeInstructions: this.config.optimizeInstructions,
+        instructionConfigured: Boolean(trimmedInstructions),
+        instructionChars: trimmedInstructions.length,
+        instructionHash: trimmedInstructions
+          ? createHash("sha256").update(trimmedInstructions).digest("hex").slice(0, 12)
+          : undefined,
+        emotionStyle: classifyTtsInstructionStyle(trimmedInstructions),
+      },
+    });
   }
 }
 
@@ -535,6 +581,20 @@ export function resolveTtsWebSocketUrl(baseUrl: string, model: string): string {
     url.searchParams.set("model", model);
   }
   return url.toString();
+}
+
+export function classifyTtsInstructionStyle(instructions: string): string {
+  const value = instructions.trim();
+  if (!value) return "none";
+  if (/(?:温暖|轻柔|陪伴|柔和、真诚)/u.test(value)) return "warm_support";
+  if (/(?:安心|安全感|稳定、安心)/u.test(value)) return "reassuring";
+  if (/(?:自然开心|轻快|笑意|灵动)/u.test(value)) return "bright_playful";
+  if (/(?:惊喜|好奇)/u.test(value)) return "curious_surprised";
+  if (/(?:冷静|克制|不与对方对抗)/u.test(value)) return "grounded_calm";
+  if (/(?:专注|清晰、可靠)/u.test(value)) return "focused";
+  if (/(?:平和|呼吸感|反思)/u.test(value)) return "reflective_soft";
+  if (/(?:有参与感|有精神|活力)/u.test(value)) return "engaged_lively";
+  return "natural";
 }
 
 function createTransport(config: QwenTtsPrewarmConfig): BaseTtsTransport {
