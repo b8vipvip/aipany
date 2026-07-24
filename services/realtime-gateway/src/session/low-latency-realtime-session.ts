@@ -109,7 +109,13 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
   }
 
   override commitAudio(): void {
-    const candidate = this.partialTracker.current()?.text ?? "";
+    const state = this.internals();
+    const tracker = (this as unknown as { partialTracker?: StablePartialTracker }).partialTracker;
+    const candidate = tracker?.current()?.text ?? "";
+    if (!candidate.trim()) {
+      state.asr?.commit();
+      return;
+    }
     this.scheduleSemanticCommit(candidate);
   }
 
