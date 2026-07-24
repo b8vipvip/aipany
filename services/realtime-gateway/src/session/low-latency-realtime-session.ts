@@ -1,11 +1,38 @@
 import type { SessionStartEvent } from "@aipany/protocol";
 import { resolveRequestedVoice } from "../mobile/client-capabilities.js";
+import {
+  buildSpeculativeMessages,
+  SpeculativeLlmCoordinator,
+  StablePartialTracker,
+  type StreamChatFunction,
+} from "../pipeline/speculative-llm.js";
+import type { ChatMessage } from "../providers/openai-compatible-llm.js";
+import { QwenTtsRealtimeClient } from "../providers/qwen-tts.js";
 import { RealtimeSession } from "./realtime-session.js";
 
 interface RealtimeSessionInternals {
-  asr?: { commit(): void };
+  asr?: {
+    commit(): void;
+    on(event: "partial", listener: (result: { text: string }) => void): unknown;
+    on(event: "speechStarted", listener: () => void): unknown;
+    on(event: "speechStopped", listener: () => void): unknown;
+  };
+  llm: { streamChat: StreamChatFunction };
+  history: ChatMessage[];
+  audioIntelligence?: {
+    modes: { getState(): { activeMode: "owner_focus" | "group" } };
+  };
   config: {
-    qwen: { ttsModel: string; ttsVoice: string };
+    qwen: {
+      apiKey: string;
+      workspaceId?: string;
+      ttsBaseUrl: string;
+      ttsModel: string;
+      ttsVoice: string;
+      ttsLanguage: string;
+      ttsSampleRate: number;
+      optimizeInstructions: boolean;
+    };
     speaker: { analysisWaitMs: number };
     speakerIdentity: { consentRequired: boolean };
   };
@@ -28,15 +55,19 @@ export function resolveOwnerFocusSpeakerAnalysisWaitMs(
 /**
  * Low-latency behavior layered on top of the stable RealtimeSession core.
  *
- * - Owner Focus without speaker-identity consent must not block the main ASR -> LLM
- *   path waiting for identity analysis that cannot legally be used anyway.
- * - Explicit input_audio_buffer.commit is forwarded to the realtime ASR provider.
- * - Mobile/web clients can request one of the voices advertised by the server for
- *   the current realtime TTS model. Unsupported values safely fall back to the
- *   server-configured voice.
+ * Phase 1 additions:
+ * - Stable ASR partials can start a private speculative LLM stream. The normal
+ *   final-turn pipeline adopts it only when the final transcript still matches.
+ * - Speaker analysis can continue in parallel with speculative inference; no
+ *   speculative token is exposed before the normal identity/mode gates pass.
+ * - A raw TTS websocket is pre-opened while the user is speaking and configured
+ *   only when the final Humanizer instructions are known.
  */
 export class LowLatencyRealtimeSession extends RealtimeSession {
   private configuredOwnerFocusSpeakerAnalysisWaitMs?: number;
+  private readonly partialTracker = new StablePartialTracker();
+  private speculativeLlm?: SpeculativeLlmCoordinator;
+  private optimizationHooksInstalled = false;
 
   override async start(event: SessionStartEvent): Promise<void> {
     const state = this.internals();
@@ -45,8 +76,10 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
       state.config.qwen.ttsVoice,
       event.session.outputVoice,
     );
+    this.installSpeculativeLlm(state);
     await super.start(event);
     this.syncOwnerFocusSpeakerAnalysisWait();
+    this.installOptimizationHooks();
   }
 
   override commitAudio(): void {
@@ -68,6 +101,52 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
     this.syncOwnerFocusSpeakerAnalysisWait();
   }
 
+  override close(): void {
+    this.speculativeLlm?.cancel("session_closed");
+    QwenTtsRealtimeClient.cancelPrewarm(this.ttsConnectionConfig());
+    super.close();
+  }
+
+  private installSpeculativeLlm(state: RealtimeSessionInternals): void {
+    if (this.speculativeLlm) return;
+    const original = state.llm.streamChat.bind(state.llm);
+    this.speculativeLlm = new SpeculativeLlmCoordinator(original);
+    state.llm.streamChat = (options) => this.speculativeLlm!.streamOrAdopt(options);
+  }
+
+  private installOptimizationHooks(): void {
+    if (this.optimizationHooksInstalled) return;
+    const asr = this.internals().asr;
+    if (!asr) return;
+    this.optimizationHooksInstalled = true;
+
+    asr.on("speechStarted", () => {
+      this.partialTracker.reset();
+      this.speculativeLlm?.cancel("new_speech");
+      void QwenTtsRealtimeClient.prewarm(this.ttsConnectionConfig());
+    });
+    asr.on("partial", (result) => {
+      this.partialTracker.observe(result.text);
+      if (this.partialTracker.shouldStartEarly()) this.startSpeculation();
+    });
+    asr.on("speechStopped", () => {
+      this.startSpeculation();
+      void QwenTtsRealtimeClient.prewarm(this.ttsConnectionConfig());
+    });
+  }
+
+  private startSpeculation(): void {
+    const state = this.internals();
+    if (state.audioIntelligence?.modes.getState().activeMode === "group") return;
+    if (this.speculativeLlm?.hasActive()) return;
+    const candidate = this.partialTracker.current();
+    if (!candidate || candidate.text.trim().length < 4) return;
+    this.speculativeLlm?.start(
+      candidate.text,
+      buildSpeculativeMessages(state.history, candidate.text),
+    );
+  }
+
   private syncOwnerFocusSpeakerAnalysisWait(): void {
     const state = this.internals();
     this.configuredOwnerFocusSpeakerAnalysisWaitMs ??= state.config.speaker.analysisWaitMs;
@@ -76,6 +155,16 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
       consentRequired: state.config.speakerIdentity.consentRequired,
       consentGranted: state.speakerConsentGranted,
     });
+  }
+
+  private ttsConnectionConfig() {
+    const qwen = this.internals().config.qwen;
+    return {
+      apiKey: qwen.apiKey,
+      workspaceId: qwen.workspaceId,
+      baseUrl: qwen.ttsBaseUrl,
+      model: qwen.ttsModel,
+    };
   }
 
   private internals(): RealtimeSessionInternals {
