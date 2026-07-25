@@ -569,7 +569,7 @@ export class QwenTtsRealtimeClient extends EventEmitter<QwenTtsEvents> {
         prosodyPitch: prosody.pitch,
         prosodyVolume: prosody.volume,
         numericProsodyApplied: resolveTtsProtocol(this.config.model) === "dashscope_inference",
-        compatibilityProfile: "workspace_safe_v1",
+        compatibilityProfile: "official_endpoint_v2",
       },
     });
   }
@@ -588,9 +588,15 @@ export function resolveTtsProtocol(model: string): QwenTtsProtocol {
 export function resolveTtsWebSocketUrl(baseUrl: string, model: string): string {
   const url = new URL(baseUrl);
   if (resolveTtsProtocol(model) === "dashscope_inference") {
-    url.pathname = url.pathname.replace(/\/api-ws\/v1\/realtime\/?$/u, "/api-ws/v1/inference/");
-    if (!/\/api-ws\/v1\/inference\/?$/u.test(url.pathname)) {
-      url.pathname = "/api-ws/v1/inference/";
+    // DashScope documents this as a fixed endpoint. Preserve the exact path and
+    // do not append a trailing slash: some dedicated workspaces reject the
+    // slash-normalized variant during run-task validation with `url error`.
+    url.pathname = url.pathname.replace(
+      /\/api-ws\/v1\/(?:realtime|inference)\/?$/u,
+      "/api-ws/v1/inference",
+    );
+    if (!/\/api-ws\/v1\/inference$/u.test(url.pathname)) {
+      url.pathname = "/api-ws/v1/inference";
     }
     url.search = "";
   } else {
@@ -679,7 +685,7 @@ function connectionConfig(config: QwenTtsConfig): QwenTtsPrewarmConfig {
 function buildHeaders(config: QwenTtsPrewarmConfig): Record<string, string> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${config.apiKey}`,
-    "user-agent": "aipany-realtime-gateway/0.8.1",
+    "user-agent": "aipany-realtime-gateway/0.8.2",
   };
   if (config.workspaceId) headers["X-DashScope-WorkSpace"] = config.workspaceId;
   return headers;
