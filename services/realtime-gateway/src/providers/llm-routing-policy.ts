@@ -12,6 +12,8 @@ export function applyLiveRoutingPolicy(
   routeClass: LiveRouteClass,
   variant: LiveRoutingExperimentVariant,
 ): LlmProviderPoolConfig {
+  const routeCount = countEnabledRoutes(config);
+  const liveDeadlineMs = routeCount > 1 ? liveFirstTokenDeadlineMs(routeClass, variant) : undefined;
   const providers = config.providers.map((provider) => {
     const scoredModels = provider.models.map((model) => ({
       model,
@@ -20,16 +22,46 @@ export function applyLiveRoutingPolicy(
     const bestAdjustment = scoredModels.length
       ? Math.min(...scoredModels.map((entry) => entry.adjustment))
       : 0;
+    const configuredDeadline = provider.firstTokenTimeoutMs ?? config.firstTokenTimeoutMs;
     return {
       ...provider,
       priority: clampPriority(provider.priority + Math.round(bestAdjustment * 0.35)),
+      firstTokenTimeoutMs: liveDeadlineMs === undefined
+        ? provider.firstTokenTimeoutMs
+        : Math.min(configuredDeadline, liveDeadlineMs),
       models: scoredModels.map(({ model, adjustment }) => ({
         ...model,
         priority: clampPriority(model.priority + adjustment),
       })),
     };
   });
-  return { ...config, providers };
+  return {
+    ...config,
+    firstTokenTimeoutMs: liveDeadlineMs === undefined
+      ? config.firstTokenTimeoutMs
+      : Math.min(config.firstTokenTimeoutMs, liveDeadlineMs),
+    providers,
+  };
+}
+
+/**
+ * Economy Live should switch routes before silence becomes socially awkward.
+ * The cap is enabled only when there is another usable route to fall back to;
+ * a single-provider installation keeps its configured timeout rather than
+ * turning a slow answer into a guaranteed failure.
+ */
+export function liveFirstTokenDeadlineMs(
+  routeClass: LiveRouteClass,
+  variant: LiveRoutingExperimentVariant,
+): number {
+  const latencyBias = variant === "latency_first" ? 0 : 350;
+  switch (routeClass) {
+    case "quick_chat": return 1_800 + latencyBias;
+    case "simple_answer": return 2_600 + latencyBias;
+    case "coding": return 4_500 + latencyBias;
+    case "reasoning": return 6_000 + latencyBias;
+    case "long_context": return 7_500 + latencyBias;
+  }
 }
 
 export function modelPriorityAdjustment(
@@ -77,6 +109,16 @@ export function modelPriorityAdjustment(
   }
 
   return Math.max(-600, Math.min(600, adjustment));
+}
+
+function countEnabledRoutes(config: LlmProviderPoolConfig): number {
+  return config.providers.reduce((count, provider) => {
+    if (!provider.enabled || !provider.apiKey.trim()) return count;
+    return count + provider.models.reduce((modelCount, model) => {
+      if (!model.enabled) return modelCount;
+      return modelCount + model.protocols.length;
+    }, 0);
+  }, 0);
 }
 
 function bestKnownLatency(model: LlmModelConfig): number | undefined {
