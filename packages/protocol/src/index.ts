@@ -40,17 +40,17 @@ export const sessionStartEventSchema = z.object({
   }),
 });
 
-export const clientTelemetryNameSchema = z.enum([
-  "endpoint_detected",
-  "barge_in_detected",
-  "playback_interrupted",
-  "playback_stop_completed",
-  "first_audio_received",
-  "playback_started",
-  "first_audio_rendered",
-  "audio_effects",
-  "heartbeat_rtt",
-]);
+/**
+ * Telemetry evolves faster than the control protocol. Keep the wire name
+ * forward-compatible while restricting it to a small snake_case namespace and
+ * primitive detail values. This prevents a new APK metric from turning into a
+ * user-visible INVALID_EVENT error on an older Gateway.
+ */
+export const clientTelemetryNameSchema = z.string()
+  .trim()
+  .min(1)
+  .max(64)
+  .regex(/^[a-z0-9]+(?:_[a-z0-9]+)*$/u, "telemetry name must be snake_case");
 
 export const clientControlEventSchema = z.discriminatedUnion("type", [
   sessionStartEventSchema,
