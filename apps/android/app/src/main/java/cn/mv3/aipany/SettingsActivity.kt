@@ -114,7 +114,7 @@ class SettingsActivity : Activity() {
             refreshVoicesForMode(selected, preserveVoice = !loadingValues)
         })
 
-        val voiceCard = card(root, "声音", "Native Live 音色来自当前模型支持列表，可直接试听实际模型声音")
+        val voiceCard = card(root, "声音", "Native Live 与 Economy Live 都可直接试听当前模型和音色的真实输出")
         voiceSpinner = Spinner(this)
         voiceSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, voices.map { it.displayName() })
         voiceCard.addView(voiceSpinner, matchWrap(top = 10))
@@ -253,8 +253,8 @@ class SettingsActivity : Activity() {
     private fun previewSelectedVoice() {
         val mode = experienceModes.getOrNull(experienceSpinner.selectedItemPosition) ?: return
         val voice = voices.getOrNull(voiceSpinner.selectedItemPosition) ?: return
-        if (mode.engine != "omni_realtime" || !voice.previewable) {
-            Toast.makeText(this, "当前模式的独立音色试听将在 Economy Live Humanizer 阶段继续完善", Toast.LENGTH_SHORT).show()
+        if (!voice.previewable) {
+            Toast.makeText(this, "当前模型或音色暂不支持试听", Toast.LENGTH_SHORT).show()
             return
         }
         previewButton.isEnabled = false
@@ -331,11 +331,10 @@ class SettingsActivity : Activity() {
 
     private fun updatePreviewButton() {
         if (!::previewButton.isInitialized || !::voiceSpinner.isInitialized) return
-        val mode = experienceModes.getOrNull(experienceSpinner.selectedItemPosition)
         val voice = voices.getOrNull(voiceSpinner.selectedItemPosition)
-        val available = mode?.engine == "omni_realtime" && voice?.previewable == true
+        val available = voice?.previewable == true
         previewButton.isEnabled = available
-        previewButton.text = if (available) "试听声音" else "Economy 音色试听后续开放"
+        previewButton.text = if (available) "试听声音" else "当前音色暂不支持试听"
     }
 
     private fun saveAndFinish() {
