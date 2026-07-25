@@ -9,7 +9,7 @@ import {
   resolveTtsWebSocketUrl,
 } from "../src/providers/qwen-tts.js";
 
-test("qwen audio tts uses dashscope inference websocket protocol", () => {
+test("qwen audio tts uses the exact dashscope inference websocket endpoint", () => {
   const model = "qwen-audio-3.0-tts-plus";
   assert.equal(isQwenAudioTtsModel(model), true);
   assert.equal(resolveTtsProtocol(model), "dashscope_inference");
@@ -18,7 +18,21 @@ test("qwen audio tts uses dashscope inference websocket protocol", () => {
       "wss://workspace.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime",
       model,
     ),
-    "wss://workspace.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference/",
+    "wss://workspace.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference",
+  );
+  assert.equal(
+    resolveTtsWebSocketUrl(
+      "wss://workspace.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference",
+      model,
+    ),
+    "wss://workspace.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference",
+  );
+  assert.equal(
+    resolveTtsWebSocketUrl(
+      "wss://workspace.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference/",
+      model,
+    ),
+    "wss://workspace.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference",
   );
 });
 
