@@ -181,7 +181,10 @@ export function validatePreviewSelection(
     return "native";
   }
 
-  if (!configuredEconomyModel || model !== configuredEconomyModel) {
+  if (!configuredEconomyModel) {
+    throw new Error("不支持的 Native Live 模型");
+  }
+  if (model !== configuredEconomyModel) {
     throw new Error("当前 Economy Live 模型与服务器配置不一致");
   }
   const allowed = getClientVoiceOptions(model, configuredEconomyVoice || defaultVoiceForModel(model));
