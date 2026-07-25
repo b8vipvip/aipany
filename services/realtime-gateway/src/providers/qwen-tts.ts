@@ -30,6 +30,19 @@ export interface QwenTtsProsody {
   style: string;
 }
 
+export interface QwenTtsInferenceParameters {
+  text_type: "PlainText";
+  voice: string;
+  format: "pcm";
+  sample_rate: number;
+  volume: number;
+  rate: number;
+  pitch: number;
+  enable_ssml: false;
+  language_hints: string[];
+  instruction: string;
+}
+
 interface QwenTtsEvents {
   audio: [Buffer];
   error: [Error];
@@ -317,7 +330,6 @@ class InferenceTaskTtsTransport extends BaseTtsTransport {
       const taskId = randomUUID();
       this.taskId = taskId;
       this.cancelled = false;
-      const prosody = resolveTtsProsody(instructions);
       await new Promise<void>((resolve, reject) => {
         this.configureResolve = resolve;
         this.configureReject = reject;
@@ -332,19 +344,7 @@ class InferenceTaskTtsTransport extends BaseTtsTransport {
             task: "tts",
             function: "SpeechSynthesizer",
             model: config.model,
-            parameters: {
-              text_type: "PlainText",
-              voice: config.voice,
-              format: "pcm",
-              sample_rate: config.sampleRate,
-              volume: prosody.volume,
-              rate: prosody.rate,
-              pitch: prosody.pitch,
-              seed: seedFromTaskId(taskId),
-              enable_ssml: false,
-              language_hints: [normalizeInferenceLanguage(config.language)],
-              instruction: instructions,
-            },
+            parameters: buildInferenceTtsParameters(config, instructions),
             input: {},
           },
         });
@@ -569,6 +569,7 @@ export class QwenTtsRealtimeClient extends EventEmitter<QwenTtsEvents> {
         prosodyPitch: prosody.pitch,
         prosodyVolume: prosody.volume,
         numericProsodyApplied: resolveTtsProtocol(this.config.model) === "dashscope_inference",
+        compatibilityProfile: "workspace_safe_v1",
       },
     });
   }
@@ -613,35 +614,50 @@ export function classifyTtsInstructionStyle(instructions: string): string {
 }
 
 /**
- * Maps the Humanizer's safe coarse style into the narrow numeric range used by
- * Qwen-Audio-TTS. The values intentionally stay close to 1.0: the goal is human
- * variation, not cartoon acting or unstable voice identity.
+ * Maps the Humanizer's coarse style to workspace-safe Qwen-Audio parameters.
+ * Some dedicated workspace deployments reject a seed or overly precise decimal
+ * values at run-task time, so rate and pitch are deliberately quantized to one
+ * decimal and variation remains primarily driven by the instruction.
  */
 export function resolveTtsProsody(instructions: string): QwenTtsProsody {
   const style = classifyTtsInstructionStyle(instructions);
   const profiles: Record<string, Omit<QwenTtsProsody, "style">> = {
     none: { volume: 50, rate: 1, pitch: 1 },
-    natural: { volume: 50, rate: 0.98, pitch: 1 },
-    warm_support: { volume: 48, rate: 0.92, pitch: 0.98 },
-    reassuring: { volume: 48, rate: 0.9, pitch: 0.97 },
-    bright_playful: { volume: 53, rate: 1.06, pitch: 1.04 },
-    curious_surprised: { volume: 52, rate: 1.03, pitch: 1.05 },
-    grounded_calm: { volume: 49, rate: 0.93, pitch: 0.97 },
-    focused: { volume: 52, rate: 1.02, pitch: 1 },
-    reflective_soft: { volume: 48, rate: 0.91, pitch: 0.98 },
-    engaged_lively: { volume: 52, rate: 1.04, pitch: 1.03 },
+    natural: { volume: 50, rate: 1, pitch: 1 },
+    warm_support: { volume: 48, rate: 0.9, pitch: 1 },
+    reassuring: { volume: 48, rate: 0.9, pitch: 1 },
+    bright_playful: { volume: 53, rate: 1.1, pitch: 1 },
+    curious_surprised: { volume: 52, rate: 1, pitch: 1.1 },
+    grounded_calm: { volume: 49, rate: 0.9, pitch: 1 },
+    focused: { volume: 52, rate: 1, pitch: 1 },
+    reflective_soft: { volume: 48, rate: 0.9, pitch: 1 },
+    engaged_lively: { volume: 52, rate: 1.1, pitch: 1 },
   };
   const base = profiles[style] ?? profiles.natural!;
-  const paceAdjustment = /(?:语速稍慢|节奏放松|不要急)/u.test(instructions)
-    ? -0.02
-    : /(?:语速稍快|轻、快|简短利落)/u.test(instructions)
-      ? 0.02
-      : 0;
   return {
     style,
     volume: clamp(Math.round(base.volume), 0, 100),
-    rate: round(clamp(base.rate + paceAdjustment, 0.5, 2), 2),
-    pitch: round(clamp(base.pitch, 0.5, 2), 2),
+    rate: round(clamp(base.rate, 0.5, 2), 1),
+    pitch: round(clamp(base.pitch, 0.5, 2), 1),
+  };
+}
+
+export function buildInferenceTtsParameters(
+  config: Pick<QwenTtsConfig, "voice" | "sampleRate" | "language">,
+  instructions: string,
+): QwenTtsInferenceParameters {
+  const prosody = resolveTtsProsody(instructions);
+  return {
+    text_type: "PlainText",
+    voice: config.voice,
+    format: "pcm",
+    sample_rate: config.sampleRate,
+    volume: prosody.volume,
+    rate: prosody.rate,
+    pitch: prosody.pitch,
+    enable_ssml: false,
+    language_hints: [normalizeInferenceLanguage(config.language)],
+    instruction: instructions,
   };
 }
 
@@ -663,7 +679,7 @@ function connectionConfig(config: QwenTtsConfig): QwenTtsPrewarmConfig {
 function buildHeaders(config: QwenTtsPrewarmConfig): Record<string, string> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${config.apiKey}`,
-    "user-agent": "aipany-realtime-gateway/0.8",
+    "user-agent": "aipany-realtime-gateway/0.8.1",
   };
   if (config.workspaceId) headers["X-DashScope-WorkSpace"] = config.workspaceId;
   return headers;
@@ -674,11 +690,6 @@ function normalizeInferenceLanguage(value: string): string {
   if (["chinese", "zh-cn", "zh_cn", "zh"].includes(normalized)) return "zh";
   if (["english", "en-us", "en_us", "en"].includes(normalized)) return "en";
   return normalized || "zh";
-}
-
-function seedFromTaskId(taskId: string): number {
-  const digest = createHash("sha256").update(taskId).digest();
-  return digest.readUInt16BE(0);
 }
 
 function clamp(value: number, minimum: number, maximum: number): number {

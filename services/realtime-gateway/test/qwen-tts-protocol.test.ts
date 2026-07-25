@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  buildInferenceTtsParameters,
   classifyTtsInstructionStyle,
   isQwenAudioTtsModel,
   resolveTtsProsody,
@@ -51,10 +52,25 @@ test("humanizer style maps to bounded numeric Qwen-Audio prosody", () => {
   assert.ok(warm.pitch <= 1);
   assert.equal(bright.style, "bright_playful");
   assert.ok(bright.rate > 1);
-  assert.ok(bright.pitch > 1);
+  assert.ok(bright.pitch >= 1);
   for (const item of [warm, bright]) {
     assert.ok(item.rate >= 0.5 && item.rate <= 2);
     assert.ok(item.pitch >= 0.5 && item.pitch <= 2);
     assert.ok(item.volume >= 0 && item.volume <= 100);
   }
+});
+
+test("workspace-safe Qwen Audio payload omits seed and excessive precision", () => {
+  const parameters = buildInferenceTtsParameters(
+    { voice: "longanlingxin", sampleRate: 24_000, language: "Chinese" },
+    "用温暖、轻柔、真诚、有陪伴感的方式说话，语速稍慢。",
+  );
+
+  assert.equal(parameters.voice, "longanlingxin");
+  assert.equal(parameters.sample_rate, 24_000);
+  assert.deepEqual(parameters.language_hints, ["zh"]);
+  assert.equal("seed" in parameters, false);
+  assert.equal(Number.isInteger(parameters.rate * 10), true);
+  assert.equal(Number.isInteger(parameters.pitch * 10), true);
+  assert.ok(parameters.instruction.length > 0);
 });
