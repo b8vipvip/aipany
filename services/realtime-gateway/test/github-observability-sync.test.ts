@@ -57,6 +57,12 @@ test("github observability sync uploads every diagnostic event in sanitized batc
       heartbeatRttMs: 32,
       networkType: "wifi",
       appVersion: "0.3.0",
+      requestedExperience: "economy_live",
+      selectedModel: "qwen-audio-3.0-tts-plus",
+      voice: "longanlingxin",
+      protocolFamily: "dashscope_inference",
+      emotionStyle: "warm_support",
+      instructionHash: "abc123def456",
       message: "upstream failed token=super-secret-value",
     },
   });
@@ -91,6 +97,12 @@ test("github observability sync uploads every diagnostic event in sanitized batc
   assert.equal(payload.events[0]!.data?.bargeInDetectToPlaybackStopMs, 55);
   assert.equal(payload.events[0]!.data?.heartbeatRttMs, 32);
   assert.equal(payload.events[0]!.data?.networkType, "wifi");
+  assert.equal(payload.events[0]!.data?.requestedExperience, "economy_live");
+  assert.equal(payload.events[0]!.data?.selectedModel, "qwen-audio-3.0-tts-plus");
+  assert.equal(payload.events[0]!.data?.voice, "longanlingxin");
+  assert.equal(payload.events[0]!.data?.protocolFamily, "dashscope_inference");
+  assert.equal(payload.events[0]!.data?.emotionStyle, "warm_support");
+  assert.equal(payload.events[0]!.data?.instructionHash, "abc123def456");
 });
 
 test("github observability sync blocks public repositories unless explicitly allowed", async (t) => {
