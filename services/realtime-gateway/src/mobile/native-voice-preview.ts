@@ -1,27 +1,48 @@
+import { loadConfig } from "../config.js";
 import {
   defaultVoiceForModel,
   getClientVoiceOptions,
 } from "./client-capabilities.js";
 import { SUPPORTED_NATIVE_REALTIME_MODELS } from "./realtime-experience.js";
 import { QwenOmniRealtimeClient, type QwenOmniRealtimeConfig } from "../providers/qwen-omni-realtime.js";
+import { QwenTtsRealtimeClient } from "../providers/qwen-tts.js";
 
 const PREVIEW_TEXT = "你好，我是小派。很高兴认识你，我们来轻松聊聊天吧。";
 const PREVIEW_TIMEOUT_MS = 20_000;
 const MAX_PREVIEW_BYTES = 2 * 1024 * 1024;
 const CACHE_TTL_MS = 30 * 60 * 1000;
 
+const ECONOMY_PREVIEW_INSTRUCTION = [
+  "这是音色试听。",
+  "请用自然、温暖、有真实交流感的中文口语朗读。",
+  "语速舒缓但不拖沓，句间有轻微呼吸感，不要播音腔，不要扩展内容。",
+].join("");
+
 type RealtimeClientFactory = (config: QwenOmniRealtimeConfig) => QwenOmniRealtimeClient;
+type EconomyClientFactory = ConstructorParameters<typeof QwenTtsRealtimeClient> extends [infer Config, infer Instructions]
+  ? (config: Config, instructions: Instructions) => QwenTtsRealtimeClient
+  : never;
 
 interface CachedPreview {
   createdAt: number;
   audio: Buffer;
 }
 
+/**
+ * Renders the actual upstream model voice selected by the Android client.
+ *
+ * The historical class name is retained to avoid changing the HTTP wiring, but
+ * the service now supports both Native Live and Economy Live TTS previews.
+ */
 export class NativeVoicePreviewService {
   private readonly cache = new Map<string, CachedPreview>();
   private readonly inflight = new Map<string, Promise<Buffer>>();
 
-  constructor(private readonly factory: RealtimeClientFactory = (config) => new QwenOmniRealtimeClient(config)) {}
+  constructor(
+    private readonly nativeFactory: RealtimeClientFactory = (config) => new QwenOmniRealtimeClient(config),
+    private readonly economyFactory: EconomyClientFactory = ((config, instructions) =>
+      new QwenTtsRealtimeClient(config as ConstructorParameters<typeof QwenTtsRealtimeClient>[0], instructions as string)) as EconomyClientFactory,
+  ) {}
 
   async render(input: {
     apiKey: string;
@@ -30,16 +51,29 @@ export class NativeVoicePreviewService {
     model: string;
     voice: string;
   }): Promise<Buffer> {
-    validatePreviewSelection(input.model, input.voice);
-    if (!input.apiKey.trim()) throw new Error("Native Live API Key 未配置");
+    const runtimeConfig = loadConfig();
+    const mode = validatePreviewSelection(input.model, input.voice, runtimeConfig.qwen.ttsModel, runtimeConfig.qwen.ttsVoice);
+    if (mode === "native" && !input.apiKey.trim()) throw new Error("Native Live API Key 未配置");
+    if (mode === "economy" && !runtimeConfig.qwen.apiKey.trim()) throw new Error("Economy Live DashScope API Key 未配置");
 
-    const key = `${input.model}|${input.voice}`;
+    const key = `${mode}|${input.model}|${input.voice}`;
     const cached = this.cache.get(key);
     if (cached && Date.now() - cached.createdAt < CACHE_TTL_MS) return Buffer.from(cached.audio);
     const pending = this.inflight.get(key);
     if (pending) return Buffer.from(await pending);
 
-    const promise = this.generate(input)
+    const promise = (mode === "native"
+      ? this.generateNative(input)
+      : this.generateEconomy({
+          apiKey: runtimeConfig.qwen.apiKey,
+          workspaceId: runtimeConfig.qwen.workspaceId,
+          baseUrl: runtimeConfig.qwen.ttsBaseUrl,
+          model: input.model,
+          voice: input.voice,
+          language: runtimeConfig.qwen.ttsLanguage,
+          sampleRate: runtimeConfig.qwen.ttsSampleRate,
+          optimizeInstructions: runtimeConfig.qwen.optimizeInstructions,
+        }))
       .then((audio) => {
         this.cache.set(key, { createdAt: Date.now(), audio: Buffer.from(audio) });
         return audio;
@@ -49,14 +83,14 @@ export class NativeVoicePreviewService {
     return Buffer.from(await promise);
   }
 
-  private async generate(input: {
+  private async generateNative(input: {
     apiKey: string;
     workspaceId?: string;
     baseUrl: string;
     model: string;
     voice: string;
   }): Promise<Buffer> {
-    const client = this.factory({
+    const client = this.nativeFactory({
       apiKey: input.apiKey,
       workspaceId: input.workspaceId,
       baseUrl: input.baseUrl,
@@ -84,15 +118,7 @@ export class NativeVoicePreviewService {
       const timer = setTimeout(() => finish(new Error("音色试听生成超时")), PREVIEW_TIMEOUT_MS);
       timer.unref?.();
 
-      client.on("audio", (_responseId, audio) => {
-        if (settled || audio.length === 0) return;
-        if (bytes + audio.length > MAX_PREVIEW_BYTES) {
-          finish(new Error("音色试听音频超过大小限制"));
-          return;
-        }
-        chunks.push(Buffer.from(audio));
-        bytes += audio.length;
-      });
+      client.on("audio", (_responseId, audio) => collectAudio(audio, chunks, () => bytes, (value) => { bytes = value; }, finish));
       client.on("responseDone", () => finish());
       client.on("error", (error) => finish(error));
       client.on("close", (code, reason) => {
@@ -109,14 +135,87 @@ export class NativeVoicePreviewService {
       }
     });
   }
+
+  private async generateEconomy(input: {
+    apiKey: string;
+    workspaceId?: string;
+    baseUrl: string;
+    model: string;
+    voice: string;
+    language: string;
+    sampleRate: number;
+    optimizeInstructions: boolean;
+  }): Promise<Buffer> {
+    const client = this.economyFactory(input, ECONOMY_PREVIEW_INSTRUCTION);
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    let settled = false;
+
+    return await new Promise<Buffer>(async (resolve, reject) => {
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        client.cancel();
+        if (error) reject(error);
+        else if (!bytes) reject(new Error("Economy 音色试听没有返回音频"));
+        else resolve(Buffer.concat(chunks, bytes));
+      };
+      const timer = setTimeout(() => finish(new Error("Economy 音色试听生成超时")), PREVIEW_TIMEOUT_MS);
+      timer.unref?.();
+
+      client.on("audio", (audio) => collectAudio(audio, chunks, () => bytes, (value) => { bytes = value; }, finish));
+      client.on("finished", () => finish());
+      client.on("error", (error) => finish(error));
+
+      try {
+        await client.connect();
+        client.appendText(PREVIEW_TEXT);
+        void client.finish().catch((error) => finish(error instanceof Error ? error : new Error(String(error))));
+      } catch (error) {
+        finish(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  }
 }
 
-export function validatePreviewSelection(model: string, voice: string): void {
-  if (!(SUPPORTED_NATIVE_REALTIME_MODELS as readonly string[]).includes(model)) {
-    throw new Error("不支持的 Native Live 模型");
+export function validatePreviewSelection(
+  model: string,
+  voice: string,
+  configuredEconomyModel = "",
+  configuredEconomyVoice = "",
+): "native" | "economy" {
+  if ((SUPPORTED_NATIVE_REALTIME_MODELS as readonly string[]).includes(model)) {
+    const allowed = getClientVoiceOptions(model, defaultVoiceForModel(model));
+    if (!allowed.some((item) => item.id === voice && item.previewable !== false)) {
+      throw new Error("当前 Native Live 模型不支持该试听音色");
+    }
+    return "native";
   }
-  const allowed = getClientVoiceOptions(model, defaultVoiceForModel(model));
+
+  if (!configuredEconomyModel || model !== configuredEconomyModel) {
+    throw new Error("当前 Economy Live 模型与服务器配置不一致");
+  }
+  const allowed = getClientVoiceOptions(model, configuredEconomyVoice || defaultVoiceForModel(model));
   if (!allowed.some((item) => item.id === voice && item.previewable !== false)) {
-    throw new Error("当前模型不支持该试听音色");
+    throw new Error("当前 Economy Live 模型不支持该试听音色");
   }
+  return "economy";
+}
+
+function collectAudio(
+  audio: Buffer,
+  chunks: Buffer[],
+  getBytes: () => number,
+  setBytes: (value: number) => void,
+  finish: (error?: Error) => void,
+): void {
+  if (audio.length === 0) return;
+  const nextBytes = getBytes() + audio.length;
+  if (nextBytes > MAX_PREVIEW_BYTES) {
+    finish(new Error("音色试听音频超过大小限制"));
+    return;
+  }
+  chunks.push(Buffer.from(audio));
+  setBytes(nextBytes);
 }
