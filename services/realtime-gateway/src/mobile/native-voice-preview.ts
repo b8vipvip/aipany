@@ -5,7 +5,7 @@ import {
 } from "./client-capabilities.js";
 import { SUPPORTED_NATIVE_REALTIME_MODELS } from "./realtime-experience.js";
 import { QwenOmniRealtimeClient, type QwenOmniRealtimeConfig } from "../providers/qwen-omni-realtime.js";
-import { QwenTtsRealtimeClient } from "../providers/qwen-tts.js";
+import { QwenTtsRealtimeClient, type QwenTtsConfig } from "../providers/qwen-tts.js";
 
 const PREVIEW_TEXT = "你好，我是小派。很高兴认识你，我们来轻松聊聊天吧。";
 const PREVIEW_TIMEOUT_MS = 20_000;
@@ -19,9 +19,7 @@ const ECONOMY_PREVIEW_INSTRUCTION = [
 ].join("");
 
 type RealtimeClientFactory = (config: QwenOmniRealtimeConfig) => QwenOmniRealtimeClient;
-type EconomyClientFactory = ConstructorParameters<typeof QwenTtsRealtimeClient> extends [infer Config, infer Instructions]
-  ? (config: Config, instructions: Instructions) => QwenTtsRealtimeClient
-  : never;
+type EconomyClientFactory = (config: QwenTtsConfig, instructions: string) => QwenTtsRealtimeClient;
 
 interface CachedPreview {
   createdAt: number;
@@ -40,8 +38,7 @@ export class NativeVoicePreviewService {
 
   constructor(
     private readonly nativeFactory: RealtimeClientFactory = (config) => new QwenOmniRealtimeClient(config),
-    private readonly economyFactory: EconomyClientFactory = ((config, instructions) =>
-      new QwenTtsRealtimeClient(config as ConstructorParameters<typeof QwenTtsRealtimeClient>[0], instructions as string)) as EconomyClientFactory,
+    private readonly economyFactory: EconomyClientFactory = (config, instructions) => new QwenTtsRealtimeClient(config, instructions),
   ) {}
 
   async render(input: {
@@ -136,16 +133,7 @@ export class NativeVoicePreviewService {
     });
   }
 
-  private async generateEconomy(input: {
-    apiKey: string;
-    workspaceId?: string;
-    baseUrl: string;
-    model: string;
-    voice: string;
-    language: string;
-    sampleRate: number;
-    optimizeInstructions: boolean;
-  }): Promise<Buffer> {
+  private async generateEconomy(input: QwenTtsConfig): Promise<Buffer> {
     const client = this.economyFactory(input, ECONOMY_PREVIEW_INSTRUCTION);
     const chunks: Buffer[] = [];
     let bytes = 0;
