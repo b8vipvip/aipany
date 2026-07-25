@@ -23,6 +23,13 @@ export interface QwenTtsPrewarmConfig {
 
 export type QwenTtsProtocol = "qwen_realtime" | "dashscope_inference";
 
+export interface QwenTtsProsody {
+  volume: number;
+  rate: number;
+  pitch: number;
+  style: string;
+}
+
 interface QwenTtsEvents {
   audio: [Buffer];
   error: [Error];
@@ -309,6 +316,7 @@ class InferenceTaskTtsTransport extends BaseTtsTransport {
       await this.open();
       this.taskId = randomUUID();
       this.cancelled = false;
+      const prosody = resolveTtsProsody(instructions);
       await new Promise<void>((resolve, reject) => {
         this.configureResolve = resolve;
         this.configureReject = reject;
@@ -328,9 +336,10 @@ class InferenceTaskTtsTransport extends BaseTtsTransport {
               voice: config.voice,
               format: "pcm",
               sample_rate: config.sampleRate,
-              volume: 50,
-              rate: 1.0,
-              pitch: 1.0,
+              volume: prosody.volume,
+              rate: prosody.rate,
+              pitch: prosody.pitch,
+              seed: seedFromTaskId(this.taskId),
               enable_ssml: false,
               language_hints: [normalizeInferenceLanguage(config.language)],
               instruction: instructions,
@@ -535,6 +544,7 @@ export class QwenTtsRealtimeClient extends EventEmitter<QwenTtsEvents> {
     if (this.selectionRecorded) return;
     this.selectionRecorded = true;
     const trimmedInstructions = this.instructions.trim();
+    const prosody = resolveTtsProsody(trimmedInstructions);
     recordGlobalRealtimeEvent({
       level: "info",
       category: "tts",
@@ -553,7 +563,11 @@ export class QwenTtsRealtimeClient extends EventEmitter<QwenTtsEvents> {
         instructionHash: trimmedInstructions
           ? createHash("sha256").update(trimmedInstructions).digest("hex").slice(0, 12)
           : undefined,
-        emotionStyle: classifyTtsInstructionStyle(trimmedInstructions),
+        emotionStyle: prosody.style,
+        prosodyRate: prosody.rate,
+        prosodyPitch: prosody.pitch,
+        prosodyVolume: prosody.volume,
+        numericProsodyApplied: resolveTtsProtocol(this.config.model) === "dashscope_inference",
       },
     });
   }
@@ -597,6 +611,39 @@ export function classifyTtsInstructionStyle(instructions: string): string {
   return "natural";
 }
 
+/**
+ * Maps the Humanizer's safe coarse style into the narrow numeric range used by
+ * Qwen-Audio-TTS. The values intentionally stay close to 1.0: the goal is human
+ * variation, not cartoon acting or unstable voice identity.
+ */
+export function resolveTtsProsody(instructions: string): QwenTtsProsody {
+  const style = classifyTtsInstructionStyle(instructions);
+  const profiles: Record<string, Omit<QwenTtsProsody, "style">> = {
+    none: { volume: 50, rate: 1, pitch: 1 },
+    natural: { volume: 50, rate: 0.98, pitch: 1 },
+    warm_support: { volume: 48, rate: 0.92, pitch: 0.98 },
+    reassuring: { volume: 48, rate: 0.9, pitch: 0.97 },
+    bright_playful: { volume: 53, rate: 1.06, pitch: 1.04 },
+    curious_surprised: { volume: 52, rate: 1.03, pitch: 1.05 },
+    grounded_calm: { volume: 49, rate: 0.93, pitch: 0.97 },
+    focused: { volume: 52, rate: 1.02, pitch: 1 },
+    reflective_soft: { volume: 48, rate: 0.91, pitch: 0.98 },
+    engaged_lively: { volume: 52, rate: 1.04, pitch: 1.03 },
+  };
+  const base = profiles[style] ?? profiles.natural!;
+  const paceAdjustment = /(?:语速稍慢|节奏放松|不要急)/u.test(instructions)
+    ? -0.02
+    : /(?:语速稍快|轻、快|简短利落)/u.test(instructions)
+      ? 0.02
+      : 0;
+  return {
+    style,
+    volume: clamp(Math.round(base.volume), 0, 100),
+    rate: round(clamp(base.rate + paceAdjustment, 0.5, 2), 2),
+    pitch: round(clamp(base.pitch, 0.5, 2), 2),
+  };
+}
+
 function createTransport(config: QwenTtsPrewarmConfig): BaseTtsTransport {
   return resolveTtsProtocol(config.model) === "dashscope_inference"
     ? new InferenceTaskTtsTransport(config)
@@ -615,7 +662,7 @@ function connectionConfig(config: QwenTtsConfig): QwenTtsPrewarmConfig {
 function buildHeaders(config: QwenTtsPrewarmConfig): Record<string, string> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${config.apiKey}`,
-    "user-agent": "aipany-realtime-gateway/0.7",
+    "user-agent": "aipany-realtime-gateway/0.8",
   };
   if (config.workspaceId) headers["X-DashScope-WorkSpace"] = config.workspaceId;
   return headers;
@@ -626,6 +673,20 @@ function normalizeInferenceLanguage(value: string): string {
   if (["chinese", "zh-cn", "zh_cn", "zh"].includes(normalized)) return "zh";
   if (["english", "en-us", "en_us", "en"].includes(normalized)) return "en";
   return normalized || "zh";
+}
+
+function seedFromTaskId(taskId: string): number {
+  const digest = createHash("sha256").update(taskId).digest();
+  return digest.readUInt16BE(0);
+}
+
+function clamp(value: number, minimum: number, maximum: number): number {
+  return Math.max(minimum, Math.min(maximum, value));
+}
+
+function round(value: number, digits: number): number {
+  const factor = 10 ** digits;
+  return Math.round(value * factor) / factor;
 }
 
 function poolKey(config: QwenTtsPrewarmConfig): string {
