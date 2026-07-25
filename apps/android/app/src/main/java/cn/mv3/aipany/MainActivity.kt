@@ -57,6 +57,7 @@ class MainActivity : Activity() {
     private var llmFirstTokenAt = 0L
     private var firstAudioAt = 0L
     private var waitingForFirstAudio = false
+    private var responseWatchdogGeneration = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -82,9 +83,15 @@ class MainActivity : Activity() {
             onPcmFrame = { realtimeClient.sendPcm(it) },
             onLocalSpeechStarted = {
                 if (settings.bargeInEnabled) {
-                    realtimeClient.cancelResponse()
+                    val interrupted = realtimeClient.cancelResponse()
                     audioEngine.setAssistantSpeaking(false)
-                    runOnUiThread { updateStatus("正在听你说", "已触发本地打断", VoiceOrbView.State.LISTENING) }
+                    runOnUiThread {
+                        updateStatus(
+                            "正在听你说",
+                            if (interrupted) "已触发本地打断" else "检测到语音",
+                            VoiceOrbView.State.LISTENING,
+                        )
+                    }
                 } else {
                     runOnUiThread { updateStatus("正在听你说", "检测到语音", VoiceOrbView.State.LISTENING) }
                 }
@@ -95,9 +102,13 @@ class MainActivity : Activity() {
                 llmFirstTokenAt = 0L
                 firstAudioAt = 0L
                 waitingForFirstAudio = false
-                realtimeClient.commitAudio()
+                val committed = realtimeClient.commitAudio()
                 runOnUiThread {
-                    updateStatus("正在理解", "本地智能断句已提交", VoiceOrbView.State.THINKING)
+                    if (committed) {
+                        updateStatus("正在理解", "本地智能断句已提交", VoiceOrbView.State.THINKING)
+                    } else {
+                        updateStatus("我在听", "已合并连续语音，继续等待完整表达", VoiceOrbView.State.LISTENING)
+                    }
                     renderLatency()
                 }
             },
@@ -136,6 +147,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        responseWatchdogGeneration += 1
         handler.removeCallbacksAndMessages(null)
         realtimeClient.release()
         mobileApi.release()
@@ -340,6 +352,7 @@ class MainActivity : Activity() {
     }
 
     private fun reconnect() {
+        responseWatchdogGeneration += 1
         audioEngine.stop()
         realtimeClient.close()
         sessionActive = false
@@ -367,6 +380,7 @@ class MainActivity : Activity() {
 
     private fun handleConnectionState(message: String) {
         if (message.startsWith("连接失败") || message == "连接已断开") {
+            responseWatchdogGeneration += 1
             sessionActive = false
             audioEngine.stop()
             updateStatus("连接中断", "可以点击重新连接", VoiceOrbView.State.ERROR)
@@ -405,8 +419,15 @@ class MainActivity : Activity() {
                 firstAudioAt = 0L
                 waitingForFirstAudio = false
                 updateStatus("正在思考", "小派正在组织回答", VoiceOrbView.State.THINKING)
+                val generation = ++responseWatchdogGeneration
+                handler.postDelayed({
+                    if (generation == responseWatchdogGeneration && llmFirstTokenAt == 0L && sessionActive) {
+                        updateStatus("还在思考", "正在切换更合适的回答路径", VoiceOrbView.State.THINKING)
+                    }
+                }, 1_800)
             }
             "response.text.delta" -> {
+                responseWatchdogGeneration += 1
                 if (llmFirstTokenAt == 0L) {
                     llmFirstTokenAt = SystemClock.elapsedRealtime()
                     renderLatency()
@@ -415,26 +436,36 @@ class MainActivity : Activity() {
                 answerView.text = assistantText.toString()
             }
             "response.audio.started" -> {
+                responseWatchdogGeneration += 1
                 audioEngine.setAssistantSpeaking(true)
                 waitingForFirstAudio = true
                 updateStatus("小派正在说话", "你可以随时直接打断", VoiceOrbView.State.SPEAKING)
             }
             "response.audio.done", "response.done" -> {
+                responseWatchdogGeneration += 1
                 audioEngine.setAssistantSpeaking(false)
                 updateStatus("我在听", "可以继续说话", if (micPaused) VoiceOrbView.State.PAUSED else VoiceOrbView.State.LISTENING)
                 renderLatency()
             }
             "response.interrupted" -> {
+                responseWatchdogGeneration += 1
                 audioEngine.setAssistantSpeaking(false)
-                audioEngine.interruptPlayback()
+                // RealtimeClient already performed the immediate pause/flush before
+                // sending response.cancel. Do not flush AudioTrack a second time.
                 updateStatus("我在听", "上一轮已被打断", VoiceOrbView.State.LISTENING)
             }
             "mode.changed" -> refreshSettingsSummary()
-            "error" -> updateStatus(
-                "发生错误",
-                "${event.optString("code")}: ${event.optString("message")}".trim(),
-                VoiceOrbView.State.ERROR,
-            )
+            "error" -> {
+                responseWatchdogGeneration += 1
+                val retryable = event.optBoolean("retryable", false)
+                val code = event.optString("code")
+                val message = event.optString("message")
+                if (retryable || code == "INVALID_EVENT") {
+                    updateStatus("我还在线", "$code: $message".trim(), VoiceOrbView.State.LISTENING)
+                } else {
+                    updateStatus("发生错误", "$code: $message".trim(), VoiceOrbView.State.ERROR)
+                }
+            }
         }
     }
 
