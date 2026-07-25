@@ -314,7 +314,8 @@ class InferenceTaskTtsTransport extends BaseTtsTransport {
     if (this.configurePromise) return this.configurePromise;
     this.configurePromise = (async () => {
       await this.open();
-      this.taskId = randomUUID();
+      const taskId = randomUUID();
+      this.taskId = taskId;
       this.cancelled = false;
       const prosody = resolveTtsProsody(instructions);
       await new Promise<void>((resolve, reject) => {
@@ -323,7 +324,7 @@ class InferenceTaskTtsTransport extends BaseTtsTransport {
         this.send({
           header: {
             action: "run-task",
-            task_id: this.taskId,
+            task_id: taskId,
             streaming: "duplex",
           },
           payload: {
@@ -339,7 +340,7 @@ class InferenceTaskTtsTransport extends BaseTtsTransport {
               volume: prosody.volume,
               rate: prosody.rate,
               pitch: prosody.pitch,
-              seed: seedFromTaskId(this.taskId),
+              seed: seedFromTaskId(taskId),
               enable_ssml: false,
               language_hints: [normalizeInferenceLanguage(config.language)],
               instruction: instructions,
