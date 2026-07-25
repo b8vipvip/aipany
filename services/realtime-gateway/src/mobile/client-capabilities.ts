@@ -41,15 +41,15 @@ const QWEN_AUDIO_REALTIME_VOICES: ClientVoiceOption[] = [
 ];
 
 const QWEN_AUDIO_TTS_PLUS_VOICES: ClientVoiceOption[] = [
-  { id: "longanlingxin", name: "龙安灵心", gender: "female", description: "旗舰知心温暖音，适合社交陪伴与情绪化表达" },
-  { id: "longanlufeng", name: "龙安鲁风", gender: "male", description: "旗舰明亮开朗男声，表达自然有活力" },
+  { id: "longanlingxin", name: "龙安灵心", gender: "female", description: "旗舰知心温暖音，适合社交陪伴与情绪化表达", previewable: true },
+  { id: "longanlufeng", name: "龙安鲁风", gender: "male", description: "旗舰明亮开朗男声，表达自然有活力", previewable: true },
 ];
 
 const QWEN_AUDIO_TTS_FLASH_VOICES: ClientVoiceOption[] = [
-  { id: "longanhuan_v3.6", name: "龙安欢", gender: "female", description: "精品中文陪伴音色，活泼自然" },
-  { id: "longjielidou_v3.6", name: "龙杰力豆", gender: "male", description: "天真男童音色，适合儿童陪伴" },
-  { id: "loongeva_v3.6", name: "loongeva", gender: "female", description: "高智优雅英文女声" },
-  { id: "loongjohn", name: "loongJohn", gender: "male", description: "沉稳亲切的美式英文男声" },
+  { id: "longanhuan_v3.6", name: "龙安欢", gender: "female", description: "精品中文陪伴音色，活泼自然", previewable: true },
+  { id: "longjielidou_v3.6", name: "龙杰力豆", gender: "male", description: "天真男童音色，适合儿童陪伴", previewable: true },
+  { id: "loongeva_v3.6", name: "loongeva", gender: "female", description: "高智优雅英文女声", previewable: true },
+  { id: "loongjohn", name: "loongJohn", gender: "male", description: "沉稳亲切的美式英文男声", previewable: true },
 ];
 
 const QWEN35_OMNI_REALTIME_VOICE_IDS = [
@@ -94,30 +94,30 @@ const QWEN35_OMNI_REALTIME_VOICES: ClientVoiceOption[] = QWEN35_OMNI_REALTIME_VO
 }));
 
 const QWEN3_INSTRUCT_REALTIME_VOICES: ClientVoiceOption[] = [
-  { id: "Cherry", name: "芊悦", gender: "female", description: "阳光积极、亲切自然" },
-  { id: "Serena", name: "苏瑶", gender: "female", description: "温柔自然" },
-  { id: "Ethan", name: "晨煦", gender: "male", description: "阳光温暖、充满活力" },
-  { id: "Chelsie", name: "千雪", gender: "female", description: "轻快的二次元少女感" },
-  { id: "Momo", name: "茉兔", gender: "female", description: "俏皮活泼、撒娇搞怪" },
-  { id: "Vivian", name: "十三", gender: "female", description: "可爱又有一点小暴躁" },
-  { id: "Moon", name: "月白", gender: "male", description: "率性、清爽、帅气" },
-  { id: "Maia", name: "四月", gender: "female", description: "知性与温柔" },
-  { id: "Kai", name: "凯", gender: "male", description: "舒缓、放松、耐听" },
-  { id: "Nofish", name: "不吃鱼", gender: "male", description: "自然随和的设计师声线" },
-  { id: "Bella", name: "萌宝", gender: "female", description: "灵动可爱、活泼俏皮" },
-  { id: "Eldric Sage", name: "沧明子", gender: "male", description: "沉稳睿智、沧桑有故事感" },
-  { id: "Mia", name: "乖小妹", gender: "female", description: "温顺柔和、乖巧自然" },
-  { id: "Mochi", name: "沙小弥", gender: "male", description: "聪明伶俐、童真早慧" },
-  { id: "Bellona", name: "燕铮莺", gender: "female", description: "洪亮清晰、感染力强" },
-  { id: "Vincent", name: "田叔", gender: "male", description: "沙哑磁性、江湖故事感" },
-  { id: "Bunny", name: "萌小姬", gender: "female", description: "软萌甜美" },
-  { id: "Neil", name: "阿闻", gender: "male", description: "字正腔圆、专业主持感" },
-  { id: "Elias", name: "墨讲师", gender: "neutral", description: "清晰理性、适合知识讲解" },
-  { id: "Arthur", name: "徐大爷", gender: "male", description: "质朴沉稳、娓娓道来" },
-  { id: "Nini", name: "邻家妹妹", gender: "female", description: "软糯亲近、邻家感" },
-  { id: "Seren", name: "小婉", gender: "female", description: "温和舒缓、安静陪伴" },
-  { id: "Pip", name: "顽屁小孩", gender: "male", description: "调皮童真、活力十足" },
-  { id: "Stella", name: "少女阿月", gender: "female", description: "甜美少女、富有表现力" },
+  { id: "Cherry", name: "芊悦", gender: "female", description: "阳光积极、亲切自然", previewable: true },
+  { id: "Serena", name: "苏瑶", gender: "female", description: "温柔自然", previewable: true },
+  { id: "Ethan", name: "晨煦", gender: "male", description: "阳光温暖、充满活力", previewable: true },
+  { id: "Chelsie", name: "千雪", gender: "female", description: "轻快的二次元少女感", previewable: true },
+  { id: "Momo", name: "茉兔", gender: "female", description: "俏皮活泼、撒娇搞怪", previewable: true },
+  { id: "Vivian", name: "十三", gender: "female", description: "可爱又有一点小暴躁", previewable: true },
+  { id: "Moon", name: "月白", gender: "male", description: "率性、清爽、帅气", previewable: true },
+  { id: "Maia", name: "四月", gender: "female", description: "知性与温柔", previewable: true },
+  { id: "Kai", name: "凯", gender: "male", description: "舒缓、放松、耐听", previewable: true },
+  { id: "Nofish", name: "不吃鱼", gender: "male", description: "自然随和的设计师声线", previewable: true },
+  { id: "Bella", name: "萌宝", gender: "female", description: "灵动可爱、活泼俏皮", previewable: true },
+  { id: "Eldric Sage", name: "沧明子", gender: "male", description: "沉稳睿智、沧桑有故事感", previewable: true },
+  { id: "Mia", name: "乖小妹", gender: "female", description: "温顺柔和、乖巧自然", previewable: true },
+  { id: "Mochi", name: "沙小弥", gender: "male", description: "聪明伶俐、童真早慧", previewable: true },
+  { id: "Bellona", name: "燕铮莺", gender: "female", description: "洪亮清晰、感染力强", previewable: true },
+  { id: "Vincent", name: "田叔", gender: "male", description: "沙哑磁性、江湖故事感", previewable: true },
+  { id: "Bunny", name: "萌小姬", gender: "female", description: "软萌甜美", previewable: true },
+  { id: "Neil", name: "阿闻", gender: "male", description: "字正腔圆、专业主持感", previewable: true },
+  { id: "Elias", name: "墨讲师", gender: "neutral", description: "清晰理性、适合知识讲解", previewable: true },
+  { id: "Arthur", name: "徐大爷", gender: "male", description: "质朴沉稳、娓娓道来", previewable: true },
+  { id: "Nini", name: "邻家妹妹", gender: "female", description: "软糯亲近、邻家感", previewable: true },
+  { id: "Seren", name: "小婉", gender: "female", description: "温和舒缓、安静陪伴", previewable: true },
+  { id: "Pip", name: "顽屁小孩", gender: "male", description: "调皮童真、活力十足", previewable: true },
+  { id: "Stella", name: "少女阿月", gender: "female", description: "甜美少女、富有表现力", previewable: true },
 ];
 
 export function getClientVoiceOptions(model: string, configuredVoice: string): ClientVoiceOption[] {
@@ -134,6 +134,7 @@ export function getClientVoiceOptions(model: string, configuredVoice: string): C
     name: configuredVoice,
     gender: "neutral",
     description: "服务器当前配置音色",
+    previewable: true,
   }];
 }
 
@@ -179,7 +180,7 @@ export function defaultVoiceForModel(model: string): string {
 function ensureConfiguredVoice(voices: ClientVoiceOption[], configuredVoice: string): ClientVoiceOption[] {
   if (voices.some((voice) => voice.id === configuredVoice)) return voices.map(cloneVoice);
   return [
-    { id: configuredVoice, name: configuredVoice, gender: "neutral", description: "服务器当前配置音色" },
+    { id: configuredVoice, name: configuredVoice, gender: "neutral", description: "服务器当前配置音色", previewable: true },
     ...voices.map(cloneVoice),
   ];
 }
