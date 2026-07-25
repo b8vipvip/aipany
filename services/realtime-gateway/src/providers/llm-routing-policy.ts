@@ -113,10 +113,10 @@ export function modelPriorityAdjustment(
 
 function countEnabledRoutes(config: LlmProviderPoolConfig): number {
   return config.providers.reduce((count, provider) => {
-    if (!provider.enabled || !provider.apiKey.trim()) return count;
+    if (provider.enabled === false || !provider.apiKey?.trim()) return count;
     return count + provider.models.reduce((modelCount, model) => {
-      if (!model.enabled) return modelCount;
-      return modelCount + model.protocols.length;
+      if (model.enabled === false) return modelCount;
+      return modelCount + (model.protocols?.length ?? 0);
     }, 0);
   }, 0);
 }
