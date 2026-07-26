@@ -60,7 +60,13 @@ class AudioEngine(
     private var automaticGainControl: AutomaticGainControl? = null
 
     private val endpointDetector = EndpointDetector(
-        onSpeechStarted = onLocalSpeechStarted,
+        onSpeechStarted = {
+            if (bargeInEnabled && assistantSpeaking) {
+                ClientTelemetryBus.report("local_playback_barge_in")
+                interruptPlayback()
+            }
+            onLocalSpeechStarted()
+        },
         onEndpointDetected = onEndpointDetected,
         onLevel = onLevel,
     )
