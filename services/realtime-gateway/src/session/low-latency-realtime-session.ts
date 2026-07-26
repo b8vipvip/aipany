@@ -4,6 +4,7 @@ import { resolveRequestedVoice } from "../mobile/client-capabilities.js";
 import { recordGlobalRealtimeEvent } from "../observability/global-observability.js";
 import { AcousticProsodyAnalyzer, type AcousticProsodySnapshot } from "../pipeline/acoustic-prosody-analyzer.js";
 import { BackchannelEngine, getBackchannelAudio } from "../pipeline/backchannel-engine.js";
+import { ConversationPresenceEngine } from "../pipeline/conversation-presence.js";
 import { InterruptionMemory } from "../pipeline/interruption-memory.js";
 import { LiveModelRouter } from "../pipeline/live-model-router.js";
 import { SemanticTurnManager } from "../pipeline/semantic-turn-manager.js";
@@ -33,7 +34,7 @@ interface RealtimeSessionInternals {
     on(event: "partial", listener: (result: { text: string; emotion: UserEmotion }) => void): unknown;
     on(event: "speechStarted", listener: () => void): unknown;
     on(event: "speechStopped", listener: () => void): unknown;
-    on(event: "final", listener: () => void): unknown;
+    on(event: "final", listener: (result: { text: string; emotion: UserEmotion; language?: string }) => void): unknown;
   };
   llm: { streamChat: RoutedStreamChatFunction };
   liveHumanizer: { setAcousticContext(snapshot: AcousticProsodySnapshot | undefined): void };
@@ -93,12 +94,18 @@ export function resolveOwnerFocusSpeakerAnalysisWaitMs(
  * Phase 4:
  * - deterministic task-aware LLM routing and A/B assignment with safe routing
  *   telemetry for production comparison
+ *
+ * Presence layer:
+ * - a cached, context-aware spoken bridge is emitted only when the LLM has not
+ *   produced its first text quickly enough; it gives human-like turn presence
+ *   without repeatedly saying “我在听” and without another LLM request
  */
 export class LowLatencyRealtimeSession extends RealtimeSession {
   private configuredOwnerFocusSpeakerAnalysisWaitMs?: number;
   private readonly partialTracker = new StablePartialTracker();
   private readonly semanticTurnManager = new SemanticTurnManager();
   private readonly backchannelEngine = new BackchannelEngine();
+  private readonly presenceEngine = new ConversationPresenceEngine();
   private readonly interruptionMemory = new InterruptionMemory();
   private readonly acousticProsodyAnalyzer = new AcousticProsodyAnalyzer();
   private readonly liveModelRouter = new LiveModelRouter();
@@ -106,11 +113,15 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
   private optimizationHooksInstalled = false;
   private continuityHookInstalled = false;
   private pendingCommitTimer?: ReturnType<typeof setTimeout>;
+  private latencyBridgeTimer?: ReturnType<typeof setTimeout>;
+  private latencyBridgeEpoch = 0;
   private backchannelEpoch = 0;
   private backchannelSpeechActive = false;
   private backchannelInFlight = false;
   private currentResponseText = "";
   private acousticSnapshotReady = false;
+  private lastFinalText = "";
+  private lastFinalEmotion: UserEmotion = "unknown";
 
   override async start(event: SessionStartEvent): Promise<void> {
     const state = this.internals();
@@ -162,6 +173,7 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
 
   override close(): void {
     this.clearPendingCommit();
+    this.cancelLatencyBridge();
     this.speculativeLlm?.cancel("session_closed");
     this.backchannelEpoch += 1;
     this.backchannelSpeechActive = false;
@@ -240,10 +252,14 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
           const type = typeof event.type === "string" ? event.type : "";
           if (type === "response.created") {
             this.currentResponseText = "";
+            const responseId = typeof event.responseId === "string" ? event.responseId : undefined;
+            this.scheduleLatencyBridge(responseId);
           } else if (type === "response.text.delta") {
+            if (!this.currentResponseText) this.cancelLatencyBridge();
             const delta = typeof event.delta === "string" ? event.delta : "";
             this.currentResponseText += delta;
           } else if (type === "response.interrupted") {
+            this.cancelLatencyBridge();
             const reason = normalizeInterruptReason(event.reason);
             this.interruptionMemory.remember({
               generatedText: this.currentResponseText,
@@ -251,6 +267,7 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
             });
             this.currentResponseText = "";
           } else if (type === "response.done") {
+            this.cancelLatencyBridge();
             this.currentResponseText = "";
           }
         } catch {
@@ -268,6 +285,7 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
     this.optimizationHooksInstalled = true;
 
     asr.on("speechStarted", () => {
+      this.cancelLatencyBridge();
       this.clearPendingCommit();
       this.partialTracker.reset();
       this.speculativeLlm?.cancel("new_speech");
@@ -293,7 +311,9 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
       this.startSpeculation();
       this.prewarmTts();
     });
-    asr.on("final", () => {
+    asr.on("final", (result) => {
+      this.lastFinalText = result.text.trim();
+      this.lastFinalEmotion = result.emotion;
       this.clearPendingCommit();
       this.backchannelSpeechActive = false;
       this.backchannelEngine.endSpeech();
@@ -330,6 +350,9 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
 
   private startSpeculation(): void {
     const state = this.internals();
+    // Some DashScope sessions emit transcript.final before speech.stopped. Never
+    // launch a second speculative request after the real response already exists.
+    if (state.activeResponse) return;
     if (state.audioIntelligence?.modes.getState().activeMode === "group") return;
     if (this.interruptionMemory.peek()) return;
     if (this.speculativeLlm?.hasActive()) return;
@@ -354,7 +377,7 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
 
     const epoch = this.backchannelEpoch;
     this.backchannelInFlight = true;
-    void getBackchannelAudio(decision.cue, this.ttsConfig())
+    void getBackchannelAudio(decision.cue, this.ttsConfig(), 4_000, decision.style)
       .then((audio) => {
         if (!audio.length || !this.backchannelSpeechActive || epoch !== this.backchannelEpoch) return;
         if (state.activeResponse || state.client.readyState !== WebSocket.OPEN) return;
@@ -362,6 +385,7 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
         state.client.send(JSON.stringify({
           type: "backchannel.audio.started",
           cue: decision.cue,
+          cueId: decision.cueId,
           reason: decision.reason,
           durationMs,
         }));
@@ -377,6 +401,75 @@ export class LowLatencyRealtimeSession extends RealtimeSession {
       .finally(() => {
         this.backchannelInFlight = false;
       });
+  }
+
+  private scheduleLatencyBridge(responseId: string | undefined): void {
+    this.cancelLatencyBridge();
+    const plan = this.presenceEngine.selectLatencyBridge({
+      text: this.lastFinalText,
+      emotion: this.lastFinalEmotion,
+    });
+    if (!plan) return;
+
+    const state = this.internals();
+    const epoch = this.latencyBridgeEpoch;
+    const audioPromise = getBackchannelAudio(plan.cue, this.ttsConfig(), 4_000, plan.style);
+    this.latencyBridgeTimer = setTimeout(() => {
+      this.latencyBridgeTimer = undefined;
+      void audioPromise.then((audio) => {
+        if (!audio.length || epoch !== this.latencyBridgeEpoch) return;
+        if (responseId && state.activeResponse?.id !== responseId) return;
+        if (!state.activeResponse || state.client.readyState !== WebSocket.OPEN) return;
+        const durationMs = Math.max(80, Math.ceil(audio.length / (24_000 * 2) * 1_000));
+        recordGlobalRealtimeEvent({
+          level: "info",
+          category: "presence",
+          event: "presence.latency_bridge.started",
+          sessionId: this.id,
+          engine: "cascaded",
+          data: {
+            cueId: plan.cueId,
+            style: plan.style,
+            reason: plan.reason,
+            delayMs: plan.delayMs,
+            durationMs,
+          },
+        });
+        state.client.send(JSON.stringify({
+          type: "backchannel.audio.started",
+          cue: plan.cue,
+          cueId: plan.cueId,
+          reason: "latency_bridge",
+          durationMs,
+        }));
+        state.client.send(audio, { binary: true });
+        const doneTimer = setTimeout(() => {
+          if (state.client.readyState === WebSocket.OPEN) {
+            state.client.send(JSON.stringify({ type: "backchannel.audio.done" }));
+          }
+        }, durationMs + 60);
+        doneTimer.unref?.();
+      }).catch((error) => {
+        recordGlobalRealtimeEvent({
+          level: "warn",
+          category: "presence",
+          event: "presence.latency_bridge.failed",
+          sessionId: this.id,
+          engine: "cascaded",
+          data: {
+            cueId: plan.cueId,
+            error: error instanceof Error ? error.message : String(error),
+          },
+        });
+      });
+    }, plan.delayMs);
+    this.latencyBridgeTimer.unref?.();
+  }
+
+  private cancelLatencyBridge(): void {
+    this.latencyBridgeEpoch += 1;
+    if (this.latencyBridgeTimer) clearTimeout(this.latencyBridgeTimer);
+    this.latencyBridgeTimer = undefined;
   }
 
   private prewarmTts(): void {
