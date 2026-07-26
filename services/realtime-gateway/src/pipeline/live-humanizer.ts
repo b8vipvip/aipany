@@ -103,18 +103,18 @@ export class LiveHumanizer {
         ? "像熟悉的长期伙伴一样直接接住对方，不要使用客服式开场和总结。"
         : "根据上下文自然决定回答长度，避免固定的一问一答模板。";
     const backchannelGuidance = backchannelStyle === "responsive"
-      ? "如果用户只是“嗯、哦、对、好、哈哈”这类承接，可以只给一句很短的自然反馈；不要强行展开新话题，也不要复述用户原话。"
+      ? "如果用户只是“嗯、哦、对、好、哈哈”这类承接，可以给一句很短、贴合上下文的自然反馈；不要强行展开新话题，也不要复述用户原话。"
       : backchannelStyle === "light"
         ? "可以在确实自然时用一个很短的口语反应承接，但不要每轮都加“嗯、好的、当然”。"
         : "直接进入有信息量的回答，不要固定使用寒暄前缀。";
     const lengthGuidance = question
-      ? "先直接回答问题核心，再按需要补充；第一句话尽量短，让语音尽快自然开口。"
+      ? "先直接回答问题核心，再按需要补充；第一小句控制在二到十个汉字左右，让语音尽快自然开口。"
       : compactText.length > 60
-        ? "先回应用户最核心的观点或明确表达，再分成短句继续，不要一次输出大段书面文字。"
-        : "优先短句和自然口语，能一句说清就不要说三句。";
+        ? "先用一句很短、贴合内容的话回应用户最核心的观点，再分成短句继续，不要一次输出大段书面文字。"
+        : "第一小句尽量短而具体，优先短句和自然口语，能一句说清就不要说三句。";
     const initiativeGuidance = proactivity >= 0.72 && context.secondsSinceAiSpoke > 12
-      ? "在回答完整后，可以自然带出一个紧贴当前上下文的小问题，但不要像问卷一样连续追问。"
-      : "除非上下文真的需要，不要为了延长对话机械地在句尾追加问题。";
+      ? "主动参与时，优先给出一个贴合当前内容的小观察、小联想或真实反应；必要时再自然带出一个小问题。不要总用提问推动对话，更不要用“我在呢”“你慢慢说”“我在听”代替内容。"
+      : "除非上下文真的需要，不要为了延长对话机械地在句尾追加问题；也不要用“我在呢”“你慢慢说”“嗯，我在听”作为固定承接。";
     const acousticGuidance = acoustic
       ? buildAcousticResponseGuidance(acousticSignals)
       : "没有可靠声学提示时，只依据用户明确说出的内容和对话上下文决定表达方式。";
@@ -125,9 +125,10 @@ export class LiveHumanizer {
       backchannelGuidance,
       lengthGuidance,
       initiativeGuidance,
+      "第一小句必须贴合当前内容，不能用空泛的“嗯、好的、当然”占位；连续两轮不要使用相同开头。",
       acousticGuidance,
       "声学特征只用于调整你自己的说话节奏和语气，绝不能据此断言用户的情绪、性格、健康状况或心理状态。",
-      `本轮表达基调：${smoothed.tone}；节奏${paceLabel(smoothed.pace)}；情绪强度保持自然，不表演、不播音。`,
+      `本轮表达基调：${smoothed.tone}；节奏${paceLabel(smoothed.pace)}；情绪强度保持自然，不播音、不机械朗读。`,
     ].join("\n");
 
     const pauseInstruction = smoothed.pauseStyle === "soft"
@@ -135,10 +136,18 @@ export class LiveHumanizer {
       : smoothed.pauseStyle === "compact"
         ? "停顿简短利落，保持连续交流感，不要逐字播报。"
         : "停顿像日常聊天一样自然，逗号处轻停，句号处稍停。";
+    const performanceInstruction = smoothed.profileId === "bright_playful" || laughter
+      ? "出现笑意或“哈哈”时，要像真实呼气轻笑后再说，不要把笑声逐字朗读。"
+      : ["warm_support", "reassuring", "reflective_soft", "warm_continuity"].includes(smoothed.profileId)
+        ? "允许轻微叹息感和柔和气口，但不要表演哭腔。"
+        : smoothed.profileId === "grounded_calm"
+          ? "重音可以更明确，语气有力度但保持克制，不要喊叫。"
+          : "允许自然气口和轻重变化，不要每句话都保持同一条语调线。";
     const ttsInstructions = [
       `用${smoothed.tone}的方式说话。`,
       `整体语速${paceTtsLabel(smoothed.pace)}，能量感约 ${Math.round(smoothed.energy * 100)}%，保持真实的人类起伏，不要夸张。`,
       pauseInstruction,
+      performanceInstruction,
       acoustic ? acousticTtsGuidance(acousticSignals) : "保持自然的语调起伏，不要每句都使用相同重音和相同句尾。",
       backchannelStyle === "responsive"
         ? "短回应要轻、快、像自然接话，不要把简单的“嗯”“对”读得郑重。"
@@ -286,15 +295,15 @@ function acousticTtsGuidance(signals: AcousticSignals): string {
 
 function chunkingFor(pace: SpeechPace, backchannel: BackchannelStyle, acoustic: AcousticSignals) {
   if (backchannel === "responsive") {
-    return { minChars: 4, maxChars: 22, firstChunkMinChars: 2, firstChunkMaxChars: 10 };
+    return { minChars: 4, maxChars: 22, firstChunkMinChars: 2, firstChunkMaxChars: 8 };
   }
   if (pace === "brisk" || acoustic.fastTextRate) {
-    return { minChars: 6, maxChars: 28, firstChunkMinChars: 3, firstChunkMaxChars: 14 };
+    return { minChars: 6, maxChars: 28, firstChunkMinChars: 3, firstChunkMaxChars: 10 };
   }
   if (pace === "relaxed" || pace === "slow" || acoustic.longPauses) {
-    return { minChars: 10, maxChars: 38, firstChunkMinChars: 4, firstChunkMaxChars: 18 };
+    return { minChars: 10, maxChars: 38, firstChunkMinChars: 4, firstChunkMaxChars: 12 };
   }
-  return { minChars: 8, maxChars: 32, firstChunkMinChars: 4, firstChunkMaxChars: 18 };
+  return { minChars: 8, maxChars: 32, firstChunkMinChars: 3, firstChunkMaxChars: 12 };
 }
 
 function profileStrength(profileId: string): number {
