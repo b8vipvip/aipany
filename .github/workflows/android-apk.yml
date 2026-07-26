@@ -14,11 +14,17 @@ on:
       - ".github/workflows/android-apk.yml"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-android-apk:
     runs-on: ubuntu-latest
+
+    env:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      AIPANY_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      AIPANY_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      AIPANY_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
 
     steps:
       - name: Checkout
@@ -41,6 +47,33 @@ jobs:
         with:
           gradle-version: "8.9"
 
+      - name: Resolve Android version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version_code=$((10000 + GITHUB_RUN_NUMBER))
+          version_name="0.4.${GITHUB_RUN_NUMBER}"
+          echo "version_code=$version_code" >> "$GITHUB_OUTPUT"
+          echo "version_name=$version_name" >> "$GITHUB_OUTPUT"
+          echo "AIPANY_VERSION_CODE=$version_code" >> "$GITHUB_ENV"
+          echo "AIPANY_VERSION_NAME=$version_name" >> "$GITHUB_ENV"
+
+      - name: Prepare stable release signing
+        id: signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "push" && -n "${ANDROID_KEYSTORE_BASE64:-}" && -n "${AIPANY_KEYSTORE_PASSWORD:-}" && -n "${AIPANY_KEY_ALIAS:-}" && -n "${AIPANY_KEY_PASSWORD:-}" ]]; then
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > /tmp/aipany-release.jks
+            chmod 600 /tmp/aipany-release.jks
+            echo "AIPANY_KEYSTORE_PATH=/tmp/aipany-release.jks" >> "$GITHUB_ENV"
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "Stable signing secrets are unavailable; building a separate .dev debug APK only."
+          fi
+
       - name: Run Android unit tests
         id: android_tests
         shell: bash
@@ -48,43 +81,113 @@ jobs:
           set +e
           gradle -p apps/android testDebugUnitTest --console=plain > /tmp/aipany-android-test.log 2>&1
           status=$?
-          tail -n 180 /tmp/aipany-android-test.log
+          tail -n 220 /tmp/aipany-android-test.log
           exit $status
 
-      - name: Build debug APK
-        id: android_build
+      - name: Build signed release APK
+        if: steps.signing.outputs.ready == 'true'
+        id: android_release_build
         shell: bash
         run: |
           set +e
-          gradle -p apps/android assembleDebug --console=plain > /tmp/aipany-android-build.log 2>&1
+          gradle -p apps/android assembleRelease \
+            -PAIPANY_VERSION_CODE="$AIPANY_VERSION_CODE" \
+            -PAIPANY_VERSION_NAME="$AIPANY_VERSION_NAME" \
+            --console=plain > /tmp/aipany-android-build.log 2>&1
           status=$?
-          tail -n 180 /tmp/aipany-android-build.log
+          tail -n 220 /tmp/aipany-android-build.log
+          exit $status
+
+      - name: Build isolated debug APK
+        if: steps.signing.outputs.ready != 'true'
+        id: android_debug_build
+        shell: bash
+        run: |
+          set +e
+          gradle -p apps/android assembleDebug \
+            -PAIPANY_VERSION_CODE="$AIPANY_VERSION_CODE" \
+            -PAIPANY_VERSION_NAME="$AIPANY_VERSION_NAME" \
+            --console=plain > /tmp/aipany-android-build.log 2>&1
+          status=$?
+          tail -n 220 /tmp/aipany-android-build.log
           exit $status
 
       - name: Upload Android failure logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: aipany-android-v0.3.0-failure-logs
+          name: aipany-android-v${{ steps.version.outputs.version_name }}-failure-logs
           path: |
             /tmp/aipany-android-test.log
             /tmp/aipany-android-build.log
           retention-days: 7
           if-no-files-found: warn
 
-      - name: Prepare artifact
+      - name: Prepare Android artifact and update manifest
         if: success()
+        shell: bash
+        env:
+          VERSION_CODE: ${{ steps.version.outputs.version_code }}
+          VERSION_NAME: ${{ steps.version.outputs.version_name }}
+          SIGNING_READY: ${{ steps.signing.outputs.ready }}
         run: |
+          set -euo pipefail
           mkdir -p apps/android/dist
-          cp apps/android/app/build/outputs/apk/debug/app-debug.apk apps/android/dist/Aipany-android-v0.3.0-debug.apk
+          if [[ "$SIGNING_READY" == "true" ]]; then
+            source_apk="apps/android/app/build/outputs/apk/release/app-release.apk"
+            output_apk="Aipany.apk"
+            channel="development-preview"
+          else
+            source_apk="apps/android/app/build/outputs/apk/debug/app-debug.apk"
+            output_apk="Aipany-${VERSION_NAME}-dev.apk"
+            channel="development-debug"
+          fi
+          cp "$source_apk" "apps/android/dist/$output_apk"
           cd apps/android/dist
-          sha256sum Aipany-android-v0.3.0-debug.apk > SHA256SUMS.txt
+          sha256sum "$output_apk" > SHA256SUMS.txt
+          apk_sha=$(cut -d' ' -f1 SHA256SUMS.txt)
+          export APK_SHA="$apk_sha" OUTPUT_APK="$output_apk" CHANNEL="$channel"
+          python3 - <<'PY'
+          import json, os
+          version_name = os.environ["VERSION_NAME"]
+          payload = {
+              "versionCode": int(os.environ["VERSION_CODE"]),
+              "versionName": version_name,
+              "channel": os.environ["CHANNEL"],
+              "downloadUrl": "https://github.com/b8vipvip/aipany/releases/download/android-latest/Aipany.apk",
+              "sha256": os.environ["APK_SHA"],
+              "mandatory": False,
+              "publishedAt": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+              "releaseNotes": "Aipany Android 新版本：设置界面、语音体验、稳定性与更新能力持续优化。",
+          }
+          with open("update.json", "w", encoding="utf-8") as handle:
+              json.dump(payload, handle, ensure_ascii=False, indent=2)
+              handle.write("\n")
+          PY
 
-      - name: Upload APK
+      - name: Upload APK workflow artifact
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: aipany-android-v0.3.0-debug
+          name: aipany-android-v${{ steps.version.outputs.version_name }}-${{ steps.signing.outputs.ready == 'true' && 'release' || 'dev' }}
           path: apps/android/dist/*
           retention-days: 30
           if-no-files-found: error
+
+      - name: Publish android-latest GitHub Release
+        if: github.event_name == 'push' && steps.signing.outputs.ready == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION_NAME: ${{ steps.version.outputs.version_name }}
+        run: |
+          set -euo pipefail
+          gh release delete android-latest --yes --cleanup-tag || true
+          gh release create android-latest \
+            apps/android/dist/Aipany.apk \
+            apps/android/dist/update.json \
+            apps/android/dist/SHA256SUMS.txt \
+            --target "$GITHUB_SHA" \
+            --title "Aipany Android ${VERSION_NAME}" \
+            --notes "Aipany Android 开发预览版自动更新通道。安装包已使用固定发布密钥签名并提供 SHA-256 校验。" \
+            --prerelease

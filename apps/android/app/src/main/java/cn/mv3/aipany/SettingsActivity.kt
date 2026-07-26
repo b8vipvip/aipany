@@ -2,6 +2,7 @@ package cn.mv3.aipany
 
 import android.app.Activity
 import android.graphics.Color
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.media.AudioAttributes
 import android.media.AudioFormat
@@ -26,6 +27,7 @@ import kotlin.math.roundToInt
 class SettingsActivity : Activity() {
     private var experienceModes: List<ClientExperienceModeOption> = emptyList()
     private var voices: List<ClientVoiceOption> = emptyList()
+
     private lateinit var experienceSpinner: Spinner
     private lateinit var experienceDescription: TextView
     private lateinit var voiceSpinner: Spinner
@@ -38,7 +40,9 @@ class SettingsActivity : Activity() {
     private lateinit var endpointSpinner: Spinner
     private lateinit var bargeInSwitch: Switch
     private lateinit var transcriptSwitch: Switch
+    private lateinit var autoUpdateSwitch: Switch
     private lateinit var mobileApi: MobileApiClient
+
     private var previewToken: String? = null
     private var previewTrack: AudioTrack? = null
     private var loadingValues = true
@@ -48,10 +52,16 @@ class SettingsActivity : Activity() {
         mobileApi = MobileApiClient()
         experienceModes = ClientCapabilitiesCache.loadExperienceModes(this)
         val initial = AppSettings.load(this)
-        voices = selectedMode(initial.experienceMode)?.voices.orEmpty().ifEmpty { ClientCapabilitiesCache.loadVoices(this) }
+        voices = selectedMode(initial.experienceMode)?.voices.orEmpty()
+            .ifEmpty { ClientCapabilitiesCache.loadVoices(this) }
         buildUi()
         loadValues(initial)
         loadingValues = false
+    }
+
+    override fun onResume() {
+        super.onResume()
+        AppUpdateManager.resumePendingInstall(this)
     }
 
     override fun onDestroy() {
@@ -63,104 +73,78 @@ class SettingsActivity : Activity() {
     }
 
     private fun buildUi() {
-        val root = LinearLayout(this).apply {
+        val page = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(18), dp(20), dp(36))
-            setBackgroundColor(Color.rgb(247, 248, 252))
+            setPadding(dp(18), dp(16), dp(18), dp(34))
+            setBackgroundColor(PAGE_BG)
         }
 
-        val header = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        header.addView(Button(this).apply {
-            text = "‹"
-            textSize = 28f
-            setOnClickListener { finish() }
-        }, LinearLayout.LayoutParams(dp(54), dp(48)))
-        header.addView(LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(TextView(this@SettingsActivity).apply {
-                text = "小派设置"
-                textSize = 25f
-                setTextColor(Color.rgb(20, 28, 48))
-            })
-            addView(TextView(this@SettingsActivity).apply {
-                text = "三种实时体验模式 · 当前开发阶段不涉及订阅或收费"
-                textSize = 13f
-                setTextColor(Color.rgb(100, 112, 138))
-            })
-        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        root.addView(header)
+        page.addView(buildHeader())
 
-        val experienceCard = card(root, "实时体验模式", "按体验路线切换底层实时语音架构，保存后自动重新连接")
-        experienceSpinner = Spinner(this).apply {
-            adapter = ArrayAdapter(
-                this@SettingsActivity,
-                android.R.layout.simple_spinner_dropdown_item,
-                experienceModes.map { it.title },
-            )
-        }
-        experienceCard.addView(experienceSpinner, matchWrap(top = 10))
-        experienceDescription = TextView(this).apply {
-            textSize = 13f
-            setTextColor(Color.rgb(96, 107, 128))
-            setPadding(0, dp(8), 0, 0)
-        }
-        experienceCard.addView(experienceDescription)
+        val experienceCard = sectionCard(
+            parent = page,
+            eyebrow = "REALTIME EXPERIENCE",
+            title = "实时体验模式",
+            subtitle = "在低成本级联链路和原生全双工语音之间切换",
+        )
+        experienceSpinner = styledSpinner(experienceModes.map { it.title })
+        experienceCard.addView(experienceSpinner, matchWrap(top = 14))
+        experienceDescription = bodyText()
+        experienceCard.addView(experienceDescription, matchWrap(top = 10))
         experienceSpinner.setOnItemSelectedListener(SimpleItemSelectedListener { position ->
             val selected = experienceModes.getOrNull(position) ?: return@SimpleItemSelectedListener
-            experienceDescription.text = "${selected.subtitle}\n模型：${selected.model}"
+            experienceDescription.text = buildString {
+                append(selected.subtitle)
+                append("\n模型 · ")
+                append(selected.model)
+            }
             refreshVoicesForMode(selected, preserveVoice = !loadingValues)
         })
 
-        val voiceCard = card(root, "声音", "Native Live 与 Economy Live 都可直接试听当前模型和音色的真实输出")
-        voiceSpinner = Spinner(this)
-        voiceSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, voices.map { it.displayName() })
-        voiceCard.addView(voiceSpinner, matchWrap(top = 10))
-        voiceDescription = TextView(this).apply {
-            textSize = 13f
-            setTextColor(Color.rgb(96, 107, 128))
-            setPadding(0, dp(8), 0, 0)
-        }
-        voiceCard.addView(voiceDescription)
+        val voiceCard = sectionCard(
+            parent = page,
+            eyebrow = "VOICE",
+            title = "声音与试听",
+            subtitle = "音色列表随当前体验模式自动变化，试听使用真实云端模型",
+        )
+        voiceSpinner = styledSpinner(voices.map { it.displayName() })
+        voiceCard.addView(voiceSpinner, matchWrap(top = 14))
+        voiceDescription = bodyText()
+        voiceCard.addView(voiceDescription, matchWrap(top = 10))
         voiceSpinner.setOnItemSelectedListener(SimpleItemSelectedListener { position ->
             voiceDescription.text = voices.getOrNull(position)?.description.orEmpty()
             updatePreviewButton()
         })
-        previewButton = Button(this).apply {
-            text = "试听声音"
-            textSize = 14f
+        previewButton = primaryButton("试听当前音色").apply {
             setOnClickListener { previewSelectedVoice() }
         }
-        voiceCard.addView(previewButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)).apply { topMargin = dp(12) })
+        voiceCard.addView(previewButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)).apply {
+            topMargin = dp(14)
+        })
 
-        val conversationCard = card(root, "对话方式", "这些设置由 Aipany 实时会话原生支持")
-        label(conversationCard, "交互模式")
-        modeSpinner = Spinner(this).apply {
-            adapter = ArrayAdapter(
-                this@SettingsActivity,
-                android.R.layout.simple_spinner_dropdown_item,
-                listOf("自动判断", "专注主人", "多人聊天"),
-            )
-        }
-        conversationCard.addView(modeSpinner, matchWrap())
+        val conversationCard = sectionCard(
+            parent = page,
+            eyebrow = "CONVERSATION",
+            title = "对话方式",
+            subtitle = "控制小派如何参与、什么时候主动回应，以及如何识别你的称呼",
+        )
+        fieldLabel(conversationCard, "交互模式")
+        modeSpinner = styledSpinner(listOf("自动判断", "专注主人", "多人聊天"))
+        conversationCard.addView(modeSpinner, matchWrap(top = 6))
 
-        val proactivityRow = LinearLayout(this).apply {
+        val proactivityHeader = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        proactivityRow.addView(TextView(this).apply {
+        proactivityHeader.addView(TextView(this).apply {
             text = "主动参与程度"
             textSize = 14f
-            setTextColor(Color.rgb(40, 50, 70))
+            setTextColor(TEXT_PRIMARY)
+            setTypeface(typeface, Typeface.BOLD)
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        proactivityValue = TextView(this).apply {
-            textSize = 14f
-            setTextColor(Color.rgb(79, 70, 229))
-        }
-        proactivityRow.addView(proactivityValue)
-        conversationCard.addView(proactivityRow, matchWrap(top = 14))
+        proactivityValue = valueBadge()
+        proactivityHeader.addView(proactivityValue)
+        conversationCard.addView(proactivityHeader, matchWrap(top = 18))
         proactivitySeek = SeekBar(this).apply {
             max = 100
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
@@ -171,68 +155,138 @@ class SettingsActivity : Activity() {
                 override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
             })
         }
-        conversationCard.addView(proactivitySeek, matchWrap())
+        conversationCard.addView(proactivitySeek, matchWrap(top = 4))
+        conversationCard.addView(hintText("数值越高，小派越愿意主动接话、追问和参与多人对话。"), matchWrap(top = 2))
 
-        label(conversationCard, "唤醒名 / 助手别名")
+        fieldLabel(conversationCard, "唤醒名 / 助手别名")
         aliasesInput = EditText(this).apply {
             hint = "Aipany, 小派"
+            textSize = 15f
             setSingleLine(true)
-            background = rounded(Color.WHITE, dp(12).toFloat(), Color.rgb(222, 226, 236))
-            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = rounded(Color.WHITE, dp(14).toFloat(), BORDER)
+            setPadding(dp(14), dp(12), dp(14), dp(12))
         }
-        conversationCard.addView(aliasesInput, matchWrap())
+        conversationCard.addView(aliasesInput, matchWrap(top = 6))
 
-        val realtimeCard = card(root, "实时控制", "Economy Live 使用本地断句；Native Live 主要使用模型侧 Smart Turn / VAD")
-        label(realtimeCard, "本地自动断句速度")
-        endpointSpinner = Spinner(this).apply {
-            adapter = ArrayAdapter(
-                this@SettingsActivity,
-                android.R.layout.simple_spinner_dropdown_item,
-                EndpointProfile.entries.map { "${it.title} · ${it.subtitle}" },
-            )
+        val realtimeCard = sectionCard(
+            parent = page,
+            eyebrow = "LIVE CONTROL",
+            title = "实时控制",
+            subtitle = "优化断句、打断和转写显示，适应不同环境与使用习惯",
+        )
+        fieldLabel(realtimeCard, "本地自动断句")
+        endpointSpinner = styledSpinner(EndpointProfile.entries.map { "${it.title} · ${it.subtitle}" })
+        realtimeCard.addView(endpointSpinner, matchWrap(top = 6))
+        bargeInSwitch = settingsSwitch(
+            realtimeCard,
+            title = "允许随时打断小派",
+            subtitle = "检测到你开口后立即停止当前语音并进入新一轮",
+            checked = true,
+        )
+        transcriptSwitch = settingsSwitch(
+            realtimeCard,
+            title = "显示实时识别文字",
+            subtitle = "在主界面显示你的转写内容，方便检查识别准确度",
+            checked = true,
+        )
+
+        val updateCard = sectionCard(
+            parent = page,
+            eyebrow = "ABOUT & UPDATE",
+            title = "关于 Aipany",
+            subtitle = "版本更新由 GitHub Release 安全分发，安装前会校验 APK 完整性",
+        )
+        updateCard.addView(infoRow("当前版本", "${BuildConfig.VERSION_NAME}  (${BuildConfig.VERSION_CODE})"), matchWrap(top = 8))
+        updateCard.addView(infoRow("更新通道", if (BuildConfig.DEBUG) "开发调试版" else "开发预览版"), matchWrap(top = 4))
+        autoUpdateSwitch = settingsSwitch(
+            updateCard,
+            title = "自动检查新版本",
+            subtitle = "启动应用时检查，并由系统定期在联网状态下后台检查",
+            checked = AppUpdateManager.isAutoCheckEnabled(this),
+        ).apply {
+            setOnCheckedChangeListener { _, checked -> AppUpdateManager.setAutoCheckEnabled(this@SettingsActivity, checked) }
         }
-        realtimeCard.addView(endpointSpinner, matchWrap())
-        bargeInSwitch = addSwitch(realtimeCard, "允许随时打断小派", "你一开口就立即停止当前 AI 播放并开始新一轮", true)
-        transcriptSwitch = addSwitch(realtimeCard, "显示实时识别文字", "主界面显示你说的话和实时转写结果", true)
+        updateCard.addView(secondaryButton("检查更新").apply {
+            setOnClickListener { AppUpdateManager.checkForUpdate(this@SettingsActivity, interactive = true) }
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)).apply { topMargin = dp(14) })
+        updateCard.addView(
+            hintText("更新包会自动下载并校验 SHA-256。Android 出于安全限制，安装时仍会显示系统确认界面。"),
+            matchWrap(top = 10),
+        )
 
-        root.addView(Button(this).apply {
-            text = "保存并应用"
+        page.addView(primaryButton("保存并应用设置").apply {
             textSize = 16f
-            setTextColor(Color.WHITE)
-            background = rounded(Color.rgb(79, 70, 229), dp(16).toFloat())
             setOnClickListener { saveAndFinish() }
-        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(54)).apply { topMargin = dp(22) })
-
-        root.addView(TextView(this).apply {
-            text = "保存后主界面会自动重新连接，让新的体验模式、模型路线和音色立即生效。"
-            textSize = 12f
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)).apply { topMargin = dp(22) })
+        page.addView(hintText("保存后主界面会自动重新连接，使体验模式、音色和实时控制立即生效。").apply {
             gravity = Gravity.CENTER
-            setTextColor(Color.rgb(128, 138, 158))
-            setPadding(0, dp(12), 0, 0)
-        })
+        }, matchWrap(top = 10))
 
-        setContentView(ScrollView(this).apply { addView(root) })
+        setContentView(ScrollView(this).apply {
+            isFillViewport = true
+            addView(page)
+        })
+    }
+
+    private fun buildHeader(): View {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(Button(this@SettingsActivity).apply {
+                text = "‹"
+                textSize = 28f
+                setTextColor(TEXT_PRIMARY)
+                background = rounded(Color.WHITE, dp(14).toFloat(), BORDER)
+                setOnClickListener { finish() }
+            }, LinearLayout.LayoutParams(dp(52), dp(48)).apply { marginEnd = dp(12) })
+            addView(LinearLayout(this@SettingsActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(TextView(this@SettingsActivity).apply {
+                    text = "小派设置"
+                    textSize = 27f
+                    setTextColor(TEXT_PRIMARY)
+                    setTypeface(typeface, Typeface.BOLD)
+                })
+                addView(TextView(this@SettingsActivity).apply {
+                    text = "语音体验、对话偏好与应用更新"
+                    textSize = 13f
+                    setTextColor(TEXT_SECONDARY)
+                    setPadding(0, dp(3), 0, 0)
+                })
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(TextView(this@SettingsActivity).apply {
+                text = "DEV"
+                textSize = 11f
+                gravity = Gravity.CENTER
+                setTextColor(ACCENT)
+                setTypeface(typeface, Typeface.BOLD)
+                background = rounded(ACCENT_SOFT, dp(18).toFloat())
+                setPadding(dp(12), dp(7), dp(12), dp(7))
+            })
+        }
     }
 
     private fun loadValues(settings: AppSettings) {
         val modePosition = experienceModes.indexOfFirst { it.id == settings.experienceMode }.takeIf { it >= 0 } ?: 0
         experienceSpinner.setSelection(modePosition)
-        val mode = experienceModes.getOrNull(modePosition)
-        if (mode != null) {
-            experienceDescription.text = "${mode.subtitle}\n模型：${mode.model}"
+        experienceModes.getOrNull(modePosition)?.let { mode ->
+            experienceDescription.text = "${mode.subtitle}\n模型 · ${mode.model}"
             refreshVoicesForMode(mode, preserveVoice = false, preferredVoice = settings.voiceId)
         }
-        modeSpinner.setSelection(when (settings.interactionMode) {
-            "owner_focus" -> 1
-            "group" -> 2
-            else -> 0
-        })
+        modeSpinner.setSelection(
+            when (settings.interactionMode) {
+                "owner_focus" -> 1
+                "group" -> 2
+                else -> 0
+            },
+        )
         proactivitySeek.progress = (settings.socialProactivity * 100).roundToInt()
         proactivityValue.text = "${proactivitySeek.progress}%"
         aliasesInput.setText(settings.assistantAliases)
         endpointSpinner.setSelection(EndpointProfile.entries.indexOf(settings.endpointProfile).coerceAtLeast(0))
         bargeInSwitch.isChecked = settings.bargeInEnabled
         transcriptSwitch.isChecked = settings.showTranscript
+        autoUpdateSwitch.isChecked = AppUpdateManager.isAutoCheckEnabled(this)
         updatePreviewButton()
     }
 
@@ -241,8 +295,13 @@ class SettingsActivity : Activity() {
         preserveVoice: Boolean,
         preferredVoice: String? = null,
     ) {
-        val previous = if (preserveVoice) voices.getOrNull(voiceSpinner.selectedItemPosition)?.id else preferredVoice
+        val previous = if (preserveVoice && ::voiceSpinner.isInitialized) {
+            voices.getOrNull(voiceSpinner.selectedItemPosition)?.id
+        } else {
+            preferredVoice
+        }
         voices = mode.voices
+        if (!::voiceSpinner.isInitialized) return
         voiceSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, voices.map { it.displayName() })
         val target = previous?.takeIf { value -> voices.any { it.id == value } } ?: mode.defaultVoice
         voiceSpinner.setSelection(voices.indexOfFirst { it.id == target }.coerceAtLeast(0))
@@ -254,7 +313,7 @@ class SettingsActivity : Activity() {
         val mode = experienceModes.getOrNull(experienceSpinner.selectedItemPosition) ?: return
         val voice = voices.getOrNull(voiceSpinner.selectedItemPosition) ?: return
         if (!voice.previewable) {
-            Toast.makeText(this, "当前模型或音色暂不支持试听", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "当前模型暂不支持独立音色试听", Toast.LENGTH_SHORT).show()
             return
         }
         previewButton.isEnabled = false
@@ -264,7 +323,7 @@ class SettingsActivity : Activity() {
                 mobileApi.previewVoice(token, mode.model, voice.id) { result ->
                     runOnUiThread {
                         previewButton.isEnabled = true
-                        previewButton.text = "试听声音"
+                        previewButton.text = "试听当前音色"
                         result.onSuccess { playPreview(it) }
                             .onFailure { Toast.makeText(this, it.message ?: "音色试听失败", Toast.LENGTH_LONG).show() }
                     }
@@ -272,7 +331,7 @@ class SettingsActivity : Activity() {
             }.onFailure {
                 runOnUiThread {
                     previewButton.isEnabled = true
-                    previewButton.text = "试听声音"
+                    previewButton.text = "试听当前音色"
                     Toast.makeText(this, it.message ?: "无法获取试听会话", Toast.LENGTH_LONG).show()
                 }
             }
@@ -334,7 +393,8 @@ class SettingsActivity : Activity() {
         val voice = voices.getOrNull(voiceSpinner.selectedItemPosition)
         val available = voice?.previewable == true
         previewButton.isEnabled = available
-        previewButton.text = if (available) "试听声音" else "当前音色暂不支持试听"
+        previewButton.alpha = if (available) 1f else 0.48f
+        previewButton.text = if (available) "试听当前音色" else "当前音色暂不可试听"
     }
 
     private fun saveAndFinish() {
@@ -357,65 +417,146 @@ class SettingsActivity : Activity() {
                 showTranscript = transcriptSwitch.isChecked,
             ),
         )
+        AppUpdateManager.setAutoCheckEnabled(this, autoUpdateSwitch.isChecked)
         setResult(RESULT_OK)
         finish()
     }
 
     private fun selectedMode(id: String): ClientExperienceModeOption? = experienceModes.firstOrNull { it.id == id }
 
-    private fun card(parent: LinearLayout, title: String, subtitle: String): LinearLayout {
+    private fun sectionCard(
+        parent: LinearLayout,
+        eyebrow: String,
+        title: String,
+        subtitle: String,
+    ): LinearLayout {
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(16), dp(16), dp(16))
-            background = rounded(Color.WHITE, dp(18).toFloat())
+            setPadding(dp(18), dp(18), dp(18), dp(18))
+            background = rounded(Color.WHITE, dp(22).toFloat(), CARD_BORDER)
+            addView(TextView(this@SettingsActivity).apply {
+                text = eyebrow
+                textSize = 10f
+                letterSpacing = 0.12f
+                setTextColor(ACCENT)
+                setTypeface(typeface, Typeface.BOLD)
+            })
             addView(TextView(this@SettingsActivity).apply {
                 text = title
-                textSize = 18f
-                setTextColor(Color.rgb(24, 32, 52))
+                textSize = 20f
+                setTextColor(TEXT_PRIMARY)
+                setTypeface(typeface, Typeface.BOLD)
+                setPadding(0, dp(5), 0, 0)
             })
             addView(TextView(this@SettingsActivity).apply {
                 text = subtitle
                 textSize = 12f
-                setTextColor(Color.rgb(112, 122, 142))
-                setPadding(0, dp(3), 0, dp(6))
+                setTextColor(TEXT_SECONDARY)
+                setLineSpacing(0f, 1.12f)
+                setPadding(0, dp(5), 0, dp(2))
             })
             parent.addView(this, matchWrap(top = 16))
         }
     }
 
-    private fun label(parent: LinearLayout, value: String) {
+    private fun styledSpinner(items: List<String>): Spinner = Spinner(this).apply {
+        adapter = ArrayAdapter(this@SettingsActivity, android.R.layout.simple_spinner_dropdown_item, items)
+        background = rounded(INPUT_BG, dp(14).toFloat(), BORDER)
+        setPadding(dp(12), dp(4), dp(8), dp(4))
+        minimumHeight = dp(52)
+    }
+
+    private fun fieldLabel(parent: LinearLayout, value: String) {
         parent.addView(TextView(this).apply {
             text = value
             textSize = 13f
-            setTextColor(Color.rgb(70, 80, 100))
-            setPadding(0, dp(12), 0, dp(5))
+            setTextColor(TEXT_PRIMARY)
+            setTypeface(typeface, Typeface.BOLD)
+        }, matchWrap(top = 18))
+    }
+
+    private fun bodyText(): TextView = TextView(this).apply {
+        textSize = 13f
+        setTextColor(TEXT_SECONDARY)
+        setLineSpacing(0f, 1.16f)
+    }
+
+    private fun hintText(value: String): TextView = TextView(this).apply {
+        text = value
+        textSize = 11f
+        setTextColor(TEXT_MUTED)
+        setLineSpacing(0f, 1.12f)
+    }
+
+    private fun valueBadge(): TextView = TextView(this).apply {
+        textSize = 13f
+        gravity = Gravity.CENTER
+        setTextColor(ACCENT)
+        setTypeface(typeface, Typeface.BOLD)
+        background = rounded(ACCENT_SOFT, dp(14).toFloat())
+        setPadding(dp(10), dp(5), dp(10), dp(5))
+    }
+
+    private fun infoRow(label: String, value: String): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(0, dp(5), 0, dp(5))
+        addView(TextView(this@SettingsActivity).apply {
+            text = label
+            textSize = 13f
+            setTextColor(TEXT_SECONDARY)
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        addView(TextView(this@SettingsActivity).apply {
+            text = value
+            textSize = 13f
+            setTextColor(TEXT_PRIMARY)
+            setTypeface(typeface, Typeface.BOLD)
         })
     }
 
     @Suppress("DEPRECATION")
-    private fun addSwitch(parent: LinearLayout, title: String, subtitle: String, checked: Boolean): Switch {
+    private fun settingsSwitch(parent: LinearLayout, title: String, subtitle: String, checked: Boolean): Switch {
+        val control = Switch(this).apply { isChecked = checked }
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(14), 0, 0)
+            setPadding(0, dp(16), 0, 0)
+            addView(LinearLayout(this@SettingsActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(TextView(this@SettingsActivity).apply {
+                    text = title
+                    textSize = 14f
+                    setTextColor(TEXT_PRIMARY)
+                    setTypeface(typeface, Typeface.BOLD)
+                })
+                addView(TextView(this@SettingsActivity).apply {
+                    text = subtitle
+                    textSize = 11f
+                    setTextColor(TEXT_MUTED)
+                    setLineSpacing(0f, 1.1f)
+                    setPadding(0, dp(3), dp(12), 0)
+                })
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(control)
         }
-        row.addView(LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(TextView(this@SettingsActivity).apply {
-                text = title
-                textSize = 14f
-                setTextColor(Color.rgb(40, 50, 70))
-            })
-            addView(TextView(this@SettingsActivity).apply {
-                text = subtitle
-                textSize = 11f
-                setTextColor(Color.rgb(128, 138, 158))
-            })
-        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        val control = Switch(this).apply { isChecked = checked }
-        row.addView(control)
         parent.addView(row, matchWrap())
         return control
+    }
+
+    private fun primaryButton(label: String): Button = Button(this).apply {
+        text = label
+        textSize = 14f
+        setTextColor(Color.WHITE)
+        setTypeface(typeface, Typeface.BOLD)
+        background = rounded(ACCENT, dp(16).toFloat())
+    }
+
+    private fun secondaryButton(label: String): Button = Button(this).apply {
+        text = label
+        textSize = 14f
+        setTextColor(ACCENT)
+        setTypeface(typeface, Typeface.BOLD)
+        background = rounded(ACCENT_SOFT, dp(16).toFloat(), Color.rgb(205, 211, 255))
     }
 
     private fun rounded(color: Int, radius: Float, strokeColor: Int? = null): GradientDrawable = GradientDrawable().apply {
@@ -433,6 +574,15 @@ class SettingsActivity : Activity() {
 
     companion object {
         private const val PREVIEW_SAMPLE_RATE = 24_000
+        private val PAGE_BG = Color.rgb(244, 246, 251)
+        private val TEXT_PRIMARY = Color.rgb(24, 31, 50)
+        private val TEXT_SECONDARY = Color.rgb(91, 103, 126)
+        private val TEXT_MUTED = Color.rgb(125, 136, 157)
+        private val ACCENT = Color.rgb(79, 70, 229)
+        private val ACCENT_SOFT = Color.rgb(238, 240, 255)
+        private val INPUT_BG = Color.rgb(249, 250, 253)
+        private val BORDER = Color.rgb(220, 225, 236)
+        private val CARD_BORDER = Color.rgb(230, 233, 241)
     }
 }
 
