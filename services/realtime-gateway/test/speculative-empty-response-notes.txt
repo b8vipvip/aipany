@@ -1,1 +1,0 @@
-Regression fixture: an adopted or normal LLM stream that completes without a token must trigger one normal retry rather than silently completing the user turn.
