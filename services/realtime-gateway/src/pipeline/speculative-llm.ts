@@ -68,6 +68,7 @@ interface ActiveSpeculation {
   done: Promise<void>;
   error?: unknown;
   adopted: boolean;
+  deltaCount: number;
 }
 
 export interface SpeculativeLlmStats {
@@ -75,6 +76,7 @@ export interface SpeculativeLlmStats {
   adopted: number;
   rejected: number;
   aborted: number;
+  emptyRetries: number;
 }
 
 /**
@@ -82,10 +84,20 @@ export interface SpeculativeLlmStats {
  * until the final transcript reaches the normal response pipeline. If the final
  * user turn still matches the partial, the buffered stream is adopted; otherwise
  * it is cancelled and the normal request runs unchanged.
+ *
+ * A speculative route is never allowed to complete the real turn with zero
+ * tokens. Upstream cancellation can race with adoption; when that happens before
+ * any token is delivered, the coordinator transparently runs the normal request.
  */
 export class SpeculativeLlmCoordinator {
   private active?: ActiveSpeculation;
-  readonly stats: SpeculativeLlmStats = { started: 0, adopted: 0, rejected: 0, aborted: 0 };
+  readonly stats: SpeculativeLlmStats = {
+    started: 0,
+    adopted: 0,
+    rejected: 0,
+    aborted: 0,
+    emptyRetries: 0,
+  };
 
   constructor(
     private readonly runOriginal: StreamChatFunction,
@@ -117,6 +129,7 @@ export class SpeculativeLlmCoordinator {
       delivery: Promise.resolve(),
       done: Promise.resolve(),
       adopted: false,
+      deltaCount: 0,
     };
     state.done = this.runOriginal({
       messages,
@@ -124,6 +137,7 @@ export class SpeculativeLlmCoordinator {
       traceId: `speculative-${now}`,
       onDelta: (delta) => {
         if (!delta) return;
+        state.deltaCount += 1;
         if (!state.sink) {
           state.pendingDeltas.push(delta);
           return;
@@ -143,14 +157,14 @@ export class SpeculativeLlmCoordinator {
     const finalText = extractLastUserText(options.messages);
     if (!state || state.adopted || !finalText || now - state.startedAt > this.maxAgeMs) {
       if (state && !state.adopted) this.cancel("expired");
-      return this.runOriginal(options);
+      return this.runNormalWithEmptyRetry(options);
     }
 
     const similarity = textSimilarity(state.partialText, finalText);
     if (similarity < this.minimumSimilarity) {
       this.stats.rejected += 1;
       this.cancel("final_mismatch");
-      return this.runOriginal(options);
+      return this.runNormalWithEmptyRetry(options);
     }
 
     clearTimeout(state.expiryTimer);
@@ -172,11 +186,22 @@ export class SpeculativeLlmCoordinator {
     } finally {
       options.signal.removeEventListener("abort", abortAdopted);
     }
-    if (state.error && !isAbortError(state.error)) {
-      this.active = undefined;
-      return this.runOriginal(options);
-    }
+
     if (this.active === state) this.active = undefined;
+
+    if (state.error) {
+      if (options.signal.aborted) throw state.error;
+      if (state.deltaCount === 0) {
+        this.stats.emptyRetries += 1;
+        return this.runNormalWithEmptyRetry(options, now);
+      }
+      throw state.error;
+    }
+
+    if (state.deltaCount === 0 && !options.signal.aborted) {
+      this.stats.emptyRetries += 1;
+      return this.runNormalWithEmptyRetry(options, now);
+    }
   }
 
   cancel(_reason = "cancelled"): void {
@@ -192,6 +217,25 @@ export class SpeculativeLlmCoordinator {
 
   hasActive(): boolean {
     return Boolean(this.active && !this.active.adopted);
+  }
+
+  private async runNormalWithEmptyRetry(options: StreamChatOptions, now = Date.now()): Promise<void> {
+    let deltaCount = 0;
+    const run = (traceId: string | undefined) => this.runOriginal({
+      ...options,
+      traceId,
+      onDelta: (delta) => {
+        if (!delta) return;
+        deltaCount += 1;
+        return options.onDelta(delta);
+      },
+    });
+
+    await run(options.traceId);
+    if (deltaCount > 0 || options.signal.aborted) return;
+
+    this.stats.emptyRetries += 1;
+    await run(`${options.traceId ?? "turn"}-empty-retry-${now}`);
   }
 }
 
@@ -244,8 +288,4 @@ function normalizeText(value: string): string {
     .toLowerCase()
     .replace(/[\s\p{P}\p{S}]+/gu, "")
     .trim();
-}
-
-function isAbortError(error: unknown): boolean {
-  return error instanceof Error && (error.name === "AbortError" || error.message.includes("aborted"));
 }
