@@ -1,71 +1,74 @@
 package cn.mv3.aipany
 
 /**
- * Binary WebSocket audio frames do not carry a response id. This gate therefore
- * opens only after a matching audio-start control event and closes locally before
- * a cancel frame is sent. Old upstream frames that arrive after a barge-in are
- * discarded instead of being interpreted as audio for the next turn.
+ * Binary WebSocket audio frames do not carry a response id. Control events still
+ * let us keep two independent bounded windows:
+ *
+ * 1. the primary assistant response
+ * 2. a short backchannel / latency-bridge cue
+ *
+ * A backchannel must never replace or clear the primary response state. Economy
+ * Live can start the main TTS stream while the short bridge is still audible;
+ * closing the bridge window must therefore leave the main response window open.
  */
 class ResponseAudioGate {
-    private var activeStreamId: String? = null
-    private var accepting = false
-    private var cancelled = false
+    private var activeResponseId: String? = null
+    private var responseAccepting = false
+    private var responseCancelled = false
+    private var backchannelAccepting = false
 
     @Synchronized
     fun onResponseCreated(responseId: String?) {
-        activeStreamId = responseId?.takeIf { it.isNotBlank() }
-        accepting = false
-        cancelled = false
+        activeResponseId = responseId?.takeIf { it.isNotBlank() }
+        responseAccepting = false
+        responseCancelled = false
     }
 
     @Synchronized
     fun onAudioStarted(responseId: String?): Boolean {
         val incoming = responseId?.takeIf { it.isNotBlank() }
-        if (cancelled || activeStreamId == null) return false
-        if (incoming != null && incoming != activeStreamId) return false
-        accepting = true
+        if (responseCancelled || activeResponseId == null) return false
+        if (incoming != null && incoming != activeResponseId) return false
+        responseAccepting = true
         return true
     }
 
     @Synchronized
     fun onBackchannelStarted() {
-        activeStreamId = BACKCHANNEL_STREAM_ID
-        accepting = true
-        cancelled = false
+        backchannelAccepting = true
     }
 
     @Synchronized
     fun cancelLocally() {
-        accepting = false
-        cancelled = true
+        responseAccepting = false
+        responseCancelled = true
+        backchannelAccepting = false
     }
 
     @Synchronized
     fun onResponseFinished(responseId: String?) {
         val incoming = responseId?.takeIf { it.isNotBlank() }
-        if (incoming == null || incoming == activeStreamId) clear()
+        if (incoming == null || incoming == activeResponseId) clearResponse()
     }
 
     @Synchronized
     fun onBackchannelFinished() {
-        if (activeStreamId == BACKCHANNEL_STREAM_ID) clear()
+        backchannelAccepting = false
     }
 
     @Synchronized
-    fun acceptsBinaryAudio(): Boolean = accepting && !cancelled && activeStreamId != null
+    fun acceptsBinaryAudio(): Boolean = backchannelAccepting ||
+        (responseAccepting && !responseCancelled && activeResponseId != null)
 
     @Synchronized
     fun reset() {
-        clear()
+        clearResponse()
+        backchannelAccepting = false
     }
 
-    private fun clear() {
-        activeStreamId = null
-        accepting = false
-        cancelled = false
-    }
-
-    companion object {
-        private const val BACKCHANNEL_STREAM_ID = "__aipany_backchannel__"
+    private fun clearResponse() {
+        activeResponseId = null
+        responseAccepting = false
+        responseCancelled = false
     }
 }
