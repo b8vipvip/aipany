@@ -73,6 +73,7 @@ object AppUpdateManager {
     private const val KEY_LAST_CHECK_AT = "last_check_at"
     private const val KEY_LAST_PROMPTED_VERSION = "last_prompted_version"
     private const val KEY_LAST_NOTIFIED_VERSION = "last_notified_version"
+    private const val KEY_NOTIFICATION_PERMISSION_ASKED = "notification_permission_asked"
     private const val KEY_PENDING_APK = "pending_apk"
     private const val CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000L
     private const val WORK_NAME = "aipany-periodic-update-check"
@@ -164,6 +165,11 @@ object AppUpdateManager {
 
     internal fun notifyUpdateAvailable(context: Context, info: AppUpdateInfo) {
         createNotificationChannel(context)
+        if (Build.VERSION.SDK_INT >= 33 &&
+            context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
         val prefs = prefs(context)
         if (prefs.getInt(KEY_LAST_NOTIFIED_VERSION, 0) == info.versionCode) return
         val intent = Intent(context, MainActivity::class.java)
@@ -185,8 +191,8 @@ object AppUpdateManager {
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .build()
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        runCatching { manager.notify(NOTIFICATION_ID, notification) }
-        prefs.edit().putInt(KEY_LAST_NOTIFIED_VERSION, info.versionCode).apply()
+        val delivered = runCatching { manager.notify(NOTIFICATION_ID, notification) }.isSuccess
+        if (delivered) prefs.edit().putInt(KEY_LAST_NOTIFIED_VERSION, info.versionCode).apply()
     }
 
     private fun showUpdateDialog(activity: Activity, info: AppUpdateInfo) {
@@ -299,17 +305,18 @@ object AppUpdateManager {
             .build()
         WorkManager.getInstance(context).enqueueUniquePeriodicWork(
             WORK_NAME,
-            ExistingPeriodicWorkPolicy.UPDATE,
+            ExistingPeriodicWorkPolicy.KEEP,
             work,
         )
     }
 
     private fun requestNotificationPermission(activity: Activity) {
-        if (Build.VERSION.SDK_INT >= 33 &&
-            activity.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
-            activity.requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), NOTIFICATION_PERMISSION_REQUEST)
-        }
+        if (Build.VERSION.SDK_INT < 33) return
+        if (activity.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return
+        val preferences = prefs(activity)
+        if (preferences.getBoolean(KEY_NOTIFICATION_PERMISSION_ASKED, false)) return
+        preferences.edit().putBoolean(KEY_NOTIFICATION_PERMISSION_ASKED, true).apply()
+        activity.requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), NOTIFICATION_PERMISSION_REQUEST)
     }
 
     private fun shouldCheckNow(context: Context): Boolean {
