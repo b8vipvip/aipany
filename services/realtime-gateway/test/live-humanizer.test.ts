@@ -100,7 +100,7 @@ test("humanizer demands a short context-specific first clause", () => {
   const result = director.direct(context({ userText: "因为刚刚吃完饭，才发现喉咙有点不舒服" }));
 
   assert.match(result.responseInstruction, /第一小句/u);
-  assert.match(result.responseInstruction, /二到十个汉字|很短而具体/u);
+  assert.match(result.responseInstruction, /二到十个汉字|短而具体/u);
   assert.match(result.responseInstruction, /不能用空泛/u);
   assert.ok(result.chunking.firstChunkMaxChars <= 12);
 });
