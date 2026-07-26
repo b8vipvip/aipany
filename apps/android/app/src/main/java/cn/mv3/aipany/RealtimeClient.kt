@@ -192,7 +192,7 @@ class RealtimeClient(
                         "response.interrupted" -> {
                             val alreadyStoppedLocally = cancelledResponseId != null &&
                                 (responseId == null || responseId == cancelledResponseId)
-                            if (!alreadyStoppedLocally) {
+                            if (!alreadyStoppedLocally && ClientAudioControlBus.isPlaybackActive()) {
                                 lastCancelledAtMs = System.currentTimeMillis()
                                 ClientAudioControlBus.interrupt()
                             }
@@ -303,13 +303,24 @@ class RealtimeClient(
     }
 
     fun cancelResponse(): Boolean {
-        val responseId = activeResponseId ?: return false
-        if (cancelledResponseId == responseId) return false
-        cancelledResponseId = responseId
+        val responseId = activeResponseId
+        val playbackActive = ClientAudioControlBus.isPlaybackActive()
+        if (responseId == null && !playbackActive) return false
+        if (responseId != null && cancelledResponseId == responseId && !playbackActive) return false
+
         lastCancelledAtMs = System.currentTimeMillis()
         audioGate.cancelLocally()
-        ClientAudioControlBus.interrupt()
-        sendTelemetry("barge_in_detected", details = mapOf("responseActive" to true))
+        if (playbackActive) ClientAudioControlBus.interrupt()
+        sendTelemetry(
+            "barge_in_detected",
+            details = mapOf(
+                "responseActive" to (responseId != null),
+                "localPlaybackActive" to playbackActive,
+            ),
+        )
+
+        if (responseId == null) return true
+        cancelledResponseId = responseId
         return sendControl("response.cancel")
     }
 
