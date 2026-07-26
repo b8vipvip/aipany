@@ -24,12 +24,14 @@ class AudioEngine(
     private val onLevel: (Float, Float, Boolean) -> Unit,
     private val onPlaybackStarted: () -> Unit = { ClientTelemetryBus.report("playback_started") },
     private val onPlaybackStopCompleted: (Double) -> Unit = { ClientTelemetryBus.report("playback_stop_completed", it) },
+    private val onPlaybackFinished: () -> Unit = { ClientTelemetryBus.report("playback_finished") },
 ) {
     companion object {
         const val INPUT_SAMPLE_RATE = 16_000
         const val OUTPUT_SAMPLE_RATE = 24_000
         private const val FRAME_SAMPLES = 320
         private const val OUTPUT_WRITE_CHUNK_BYTES = 1_920 // 40 ms PCM16 mono at 24 kHz
+        private const val PLAYBACK_DRAIN_GRACE_MS = 220L
     }
 
     data class EffectsStatus(
@@ -42,12 +44,14 @@ class AudioEngine(
     private val playbackExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val playbackLock = Any()
     private val playbackGeneration = AtomicLong(0)
+    private val playbackLifecycle = AtomicLong(0)
 
     @Volatile private var running = false
     @Volatile private var released = false
     @Volatile private var assistantSpeaking = false
     @Volatile private var bargeInEnabled = true
     @Volatile private var playbackStartedGeneration = Long.MIN_VALUE
+    @Volatile private var finishScheduledLifecycle = Long.MIN_VALUE
 
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
@@ -65,6 +69,7 @@ class AudioEngine(
         ClientAudioControlBus.attach(
             onAssistantSpeaking = { setAssistantSpeaking(it) },
             onInterruptPlayback = { interruptPlayback() },
+            isPlaybackActive = { assistantSpeaking },
         )
     }
 
@@ -129,7 +134,9 @@ class AudioEngine(
         audioRecord = record
         audioTrack = track
         playbackGeneration.incrementAndGet()
+        playbackLifecycle.incrementAndGet()
         playbackStartedGeneration = Long.MIN_VALUE
+        finishScheduledLifecycle = Long.MIN_VALUE
         endpointDetector.reset()
         track.play()
         record.startRecording()
@@ -158,8 +165,16 @@ class AudioEngine(
     }
 
     fun setAssistantSpeaking(value: Boolean) {
-        if (value && !assistantSpeaking) playbackStartedGeneration = Long.MIN_VALUE
-        assistantSpeaking = value
+        if (value) {
+            if (!assistantSpeaking) {
+                playbackStartedGeneration = Long.MIN_VALUE
+                playbackLifecycle.incrementAndGet()
+            }
+            finishScheduledLifecycle = Long.MIN_VALUE
+            assistantSpeaking = true
+            return
+        }
+        schedulePlaybackFinished()
     }
 
     fun prepareForAssistantResponse() {
@@ -200,7 +215,9 @@ class AudioEngine(
     fun interruptPlayback() {
         val startedNs = System.nanoTime()
         playbackGeneration.incrementAndGet()
+        playbackLifecycle.incrementAndGet()
         playbackStartedGeneration = Long.MIN_VALUE
+        finishScheduledLifecycle = Long.MIN_VALUE
         assistantSpeaking = false
         synchronized(playbackLock) {
             val track = audioTrack
@@ -226,7 +243,9 @@ class AudioEngine(
         if (!running && audioRecord == null && audioTrack == null) return
         running = false
         playbackGeneration.incrementAndGet()
+        playbackLifecycle.incrementAndGet()
         playbackStartedGeneration = Long.MIN_VALUE
+        finishScheduledLifecycle = Long.MIN_VALUE
         endpointDetector.reset()
         assistantSpeaking = false
 
@@ -261,6 +280,27 @@ class AudioEngine(
         ClientAudioControlBus.detach()
         captureExecutor.shutdownNow()
         playbackExecutor.shutdownNow()
+    }
+
+    private fun schedulePlaybackFinished() {
+        if (!assistantSpeaking || released) return
+        val generation = playbackGeneration.get()
+        val lifecycle = playbackLifecycle.get()
+        if (finishScheduledLifecycle == lifecycle) return
+        finishScheduledLifecycle = lifecycle
+        playbackExecutor.execute {
+            if (generation != playbackGeneration.get() || lifecycle != playbackLifecycle.get()) return@execute
+            try {
+                Thread.sleep(PLAYBACK_DRAIN_GRACE_MS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return@execute
+            }
+            if (generation != playbackGeneration.get() || lifecycle != playbackLifecycle.get()) return@execute
+            assistantSpeaking = false
+            finishScheduledLifecycle = Long.MIN_VALUE
+            onPlaybackFinished()
+        }
     }
 
     private fun enableAudioEffects(audioSessionId: Int) {
