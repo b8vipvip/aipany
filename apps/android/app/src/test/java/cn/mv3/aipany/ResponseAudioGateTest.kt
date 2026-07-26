@@ -40,4 +40,47 @@ class ResponseAudioGateTest {
         gate.onBackchannelFinished()
         assertFalse(gate.acceptsBinaryAudio())
     }
+
+    @Test
+    fun mainResponseSurvivesLatencyBridgeCompletion() {
+        val gate = ResponseAudioGate()
+        gate.onResponseCreated("response-1")
+        gate.onBackchannelStarted()
+        assertTrue(gate.acceptsBinaryAudio())
+
+        assertTrue(gate.onAudioStarted("response-1"))
+        assertTrue(gate.acceptsBinaryAudio())
+
+        gate.onBackchannelFinished()
+        assertTrue(gate.acceptsBinaryAudio())
+
+        gate.onResponseFinished("response-1")
+        assertFalse(gate.acceptsBinaryAudio())
+    }
+
+    @Test
+    fun endingResponseDoesNotCutOffAnActiveBackchannel() {
+        val gate = ResponseAudioGate()
+        gate.onResponseCreated("response-1")
+        gate.onAudioStarted("response-1")
+        gate.onBackchannelStarted()
+
+        gate.onResponseFinished("response-1")
+        assertTrue(gate.acceptsBinaryAudio())
+
+        gate.onBackchannelFinished()
+        assertFalse(gate.acceptsBinaryAudio())
+    }
+
+    @Test
+    fun localCancelClosesBothPrimaryAndBridgeWindows() {
+        val gate = ResponseAudioGate()
+        gate.onResponseCreated("response-1")
+        gate.onAudioStarted("response-1")
+        gate.onBackchannelStarted()
+        assertTrue(gate.acceptsBinaryAudio())
+
+        gate.cancelLocally()
+        assertFalse(gate.acceptsBinaryAudio())
+    }
 }
