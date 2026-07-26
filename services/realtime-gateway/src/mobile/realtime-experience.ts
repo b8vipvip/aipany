@@ -22,6 +22,8 @@ export interface RealtimeExperienceDefinition {
 }
 
 export function getRealtimeExperienceDefinitions(config: AppConfig): RealtimeExperienceDefinition[] {
+  const nativeAvailable = isNativeExperienceAvailable(config);
+  const nativeDisabledSubtitle = "音色仍可试听 · 服务器尚未开启 Native Live，正式会话会自动回退到 Economy Live";
   return [
     {
       id: "economy_live",
@@ -32,16 +34,16 @@ export function getRealtimeExperienceDefinitions(config: AppConfig): RealtimeExp
     },
     {
       id: "native_flash",
-      title: "Native Flash",
-      subtitle: "端到端实时语音 · 更低成本、更快响应",
+      title: nativeAvailable ? "Native Flash" : "Native Flash · 未启用",
+      subtitle: nativeAvailable ? "端到端实时语音 · 更低成本、更快响应" : nativeDisabledSubtitle,
       engine: "omni_realtime",
       model: QWEN_AUDIO_REALTIME_FLASH,
       recommendedTurnDetection: "smart_turn",
     },
     {
       id: "native_plus",
-      title: "Native Plus",
-      subtitle: "端到端实时语音 · 更强理解与自然表达",
+      title: nativeAvailable ? "Native Plus" : "Native Plus · 未启用",
+      subtitle: nativeAvailable ? "端到端实时语音 · 更强理解与自然表达" : nativeDisabledSubtitle,
       engine: "omni_realtime",
       model: QWEN_AUDIO_REALTIME_PLUS,
       recommendedTurnDetection: "smart_turn",
@@ -55,6 +57,10 @@ export function resolveExperienceDefinition(
 ): RealtimeExperienceDefinition | undefined {
   if (!experienceMode) return undefined;
   return getRealtimeExperienceDefinitions(config).find((item) => item.id === experienceMode);
+}
+
+export function isNativeExperienceAvailable(config: AppConfig): boolean {
+  return config.qwenOmniRealtime.enabled && Boolean(config.qwenOmniRealtime.apiKey.trim());
 }
 
 export function isQwenAudioRealtimeModel(model: string): boolean {
