@@ -11,6 +11,8 @@ import {
 import {
   QWEN_AUDIO_REALTIME_FLASH,
   QWEN_AUDIO_REALTIME_PLUS,
+  getRealtimeExperienceDefinitions,
+  isNativeExperienceAvailable,
   resolveExperienceDefinition,
 } from "../src/mobile/realtime-experience.js";
 import { validatePreviewSelection } from "../src/mobile/native-voice-preview.js";
@@ -32,6 +34,24 @@ test("three realtime experience modes are exposed without subscription semantics
   assert.equal(modes[1]?.model, QWEN_AUDIO_REALTIME_FLASH);
   assert.equal(modes[2]?.model, QWEN_AUDIO_REALTIME_PLUS);
   assert.equal(resolveExperienceDefinition(config, "native_plus")?.recommendedTurnDetection, "smart_turn");
+});
+
+test("disabled Native Live is clearly labelled while voice preview remains discoverable", () => {
+  const current = loadConfig();
+  const config = {
+    ...current,
+    qwenOmniRealtime: {
+      ...current.qwenOmniRealtime,
+      enabled: false,
+      apiKey: "configured-for-preview",
+    },
+  };
+  const modes = getRealtimeExperienceDefinitions(config);
+
+  assert.equal(isNativeExperienceAvailable(config), false);
+  assert.match(modes[1]?.title ?? "", /未启用/u);
+  assert.match(modes[1]?.subtitle ?? "", /音色仍可试听/u);
+  assert.match(modes[1]?.subtitle ?? "", /回退到 Economy Live/u);
 });
 
 test("Qwen Audio realtime modes expose every system voice and safe defaults", () => {

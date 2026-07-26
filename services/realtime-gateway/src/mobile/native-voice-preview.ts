@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { loadConfig } from "../config.js";
 import {
   defaultVoiceForModel,
@@ -11,12 +12,9 @@ const PREVIEW_TEXT = "你好，我是小派。很高兴认识你，我们来轻�
 const PREVIEW_TIMEOUT_MS = 20_000;
 const MAX_PREVIEW_BYTES = 2 * 1024 * 1024;
 const CACHE_TTL_MS = 30 * 60 * 1000;
+const CACHE_VERSION = "safe-instruction-v3";
 
-const ECONOMY_PREVIEW_INSTRUCTION = [
-  "这是音色试听。",
-  "请用自然、温暖、有真实交流感的中文口语朗读。",
-  "语速舒缓但不拖沓，句间有轻微呼吸感，不要播音腔，不要扩展内容。",
-].join("");
+const ECONOMY_PREVIEW_INSTRUCTION = "自然温暖地说，语速适中，避免播音腔。";
 
 type RealtimeClientFactory = (config: QwenOmniRealtimeConfig) => QwenOmniRealtimeClient;
 type EconomyClientFactory = (config: QwenTtsConfig, instructions: string) => QwenTtsRealtimeClient;
@@ -30,7 +28,7 @@ interface CachedPreview {
  * Renders the actual upstream model voice selected by the Android client.
  *
  * The historical class name is retained to avoid changing the HTTP wiring, but
- * the service now supports both Native Live and Economy Live TTS previews.
+ * the service supports both Native Live and Economy Live TTS previews.
  */
 export class NativeVoicePreviewService {
   private readonly cache = new Map<string, CachedPreview>();
@@ -47,17 +45,34 @@ export class NativeVoicePreviewService {
     baseUrl: string;
     model: string;
     voice: string;
+    bypassCache?: boolean;
   }): Promise<Buffer> {
     const runtimeConfig = loadConfig();
     const mode = validatePreviewSelection(input.model, input.voice, runtimeConfig.qwen.ttsModel, runtimeConfig.qwen.ttsVoice);
     if (mode === "native" && !input.apiKey.trim()) throw new Error("Native Live API Key 未配置");
     if (mode === "economy" && !runtimeConfig.qwen.apiKey.trim()) throw new Error("Economy Live DashScope API Key 未配置");
 
-    const key = `${mode}|${input.model}|${input.voice}`;
-    const cached = this.cache.get(key);
-    if (cached && Date.now() - cached.createdAt < CACHE_TTL_MS) return Buffer.from(cached.audio);
-    const pending = this.inflight.get(key);
-    if (pending) return Buffer.from(await pending);
+    const effectiveBaseUrl = mode === "native" ? input.baseUrl : runtimeConfig.qwen.ttsBaseUrl;
+    const effectiveWorkspace = mode === "native" ? input.workspaceId : runtimeConfig.qwen.workspaceId;
+    const instructionFingerprint = mode === "economy"
+      ? createHash("sha256").update(ECONOMY_PREVIEW_INSTRUCTION).digest("hex").slice(0, 12)
+      : "native";
+    const key = [
+      CACHE_VERSION,
+      mode,
+      effectiveBaseUrl.trim().replace(/\/$/u, ""),
+      effectiveWorkspace ?? "",
+      input.model,
+      input.voice,
+      instructionFingerprint,
+    ].join("|");
+
+    if (!input.bypassCache) {
+      const cached = this.cache.get(key);
+      if (cached && Date.now() - cached.createdAt < CACHE_TTL_MS) return Buffer.from(cached.audio);
+      const pending = this.inflight.get(key);
+      if (pending) return Buffer.from(await pending);
+    }
 
     const promise = (mode === "native"
       ? this.generateNative(input)
@@ -72,12 +87,18 @@ export class NativeVoicePreviewService {
           optimizeInstructions: runtimeConfig.qwen.optimizeInstructions,
         }))
       .then((audio) => {
-        this.cache.set(key, { createdAt: Date.now(), audio: Buffer.from(audio) });
+        if (!input.bypassCache) this.cache.set(key, { createdAt: Date.now(), audio: Buffer.from(audio) });
         return audio;
       })
       .finally(() => this.inflight.delete(key));
-    this.inflight.set(key, promise);
+
+    if (!input.bypassCache) this.inflight.set(key, promise);
     return Buffer.from(await promise);
+  }
+
+  clearCache(): void {
+    this.cache.clear();
+    this.inflight.clear();
   }
 
   private async generateNative(input: {
@@ -124,9 +145,7 @@ export class NativeVoicePreviewService {
 
       try {
         await client.connect();
-        if (!client.requestTextResponse(PREVIEW_TEXT)) {
-          finish(new Error("音色试听请求发送失败"));
-        }
+        if (!client.requestTextResponse(PREVIEW_TEXT)) finish(new Error("音色试听请求发送失败"));
       } catch (error) {
         finish(error instanceof Error ? error : new Error(String(error)));
       }
@@ -181,12 +200,8 @@ export function validatePreviewSelection(
     return "native";
   }
 
-  if (!configuredEconomyModel) {
-    throw new Error("不支持的 Native Live 模型");
-  }
-  if (model !== configuredEconomyModel) {
-    throw new Error("当前 Economy Live 模型与服务器配置不一致");
-  }
+  if (!configuredEconomyModel) throw new Error("不支持的 Native Live 模型");
+  if (model !== configuredEconomyModel) throw new Error("当前 Economy Live 模型与服务器配置不一致");
   const allowed = getClientVoiceOptions(model, configuredEconomyVoice || defaultVoiceForModel(model));
   if (!allowed.some((item) => item.id === voice && item.previewable !== false)) {
     throw new Error("当前 Economy Live 模型不支持该试听音色");
