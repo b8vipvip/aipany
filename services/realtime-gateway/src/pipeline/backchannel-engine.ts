@@ -1,5 +1,6 @@
 import type { InteractionMode, UserEmotion } from "@aipany/protocol";
 import { QwenTtsRealtimeClient, type QwenTtsConfig } from "../providers/qwen-tts.js";
+import { ConversationPresenceEngine, type PresenceCueStyle } from "./conversation-presence.js";
 
 export interface BackchannelObservation {
   text: string;
@@ -11,6 +12,8 @@ export interface BackchannelObservation {
 
 export interface BackchannelDecision {
   cue: string;
+  cueId: string;
+  style: PresenceCueStyle;
   reason: string;
 }
 
@@ -18,12 +21,17 @@ export interface BackchannelDecision {
  * Conservative mid-turn acknowledgement policy. A cue is allowed at most once
  * per continuous speech segment and is heavily suppressed for sensitive content,
  * short turns, group mode, or when the assistant is already answering.
+ *
+ * The actual wording is selected by ConversationPresenceEngine, which excludes
+ * recently used phrases and never uses the fixed “我在呢 / 你慢慢说 / 我在听”
+ * scripts that make a long conversation sound like an IVR system.
  */
 export class BackchannelEngine {
   private speechStartedAt = 0;
   private lastCueAt?: number;
   private cueSentThisTurn = false;
   private speechActive = false;
+  private readonly presence = new ConversationPresenceEngine();
 
   constructor(
     private readonly minimumSpeechMs = 3_800,
@@ -54,9 +62,12 @@ export class BackchannelEngine {
 
     this.cueSentThisTurn = true;
     this.lastCueAt = now;
+    const plan = this.presence.selectMidTurn({ text: compact, emotion: input.emotion });
     return {
-      cue: /(?:哈哈|笑死|太逗|好好笑)/u.test(compact) ? "哈哈，我在听。" : "嗯，我在听。",
-      reason: "long_continuous_narrative",
+      cue: plan.cue,
+      cueId: plan.cueId,
+      style: plan.style,
+      reason: plan.reason,
     };
   }
 }
@@ -69,11 +80,13 @@ export async function getBackchannelAudio(
   cue: string,
   config: BackchannelAudioConfig,
   timeoutMs = 4_000,
+  style: PresenceCueStyle = "natural",
 ): Promise<Buffer> {
-  const key = [config.baseUrl, config.model, config.voice, config.language, config.sampleRate, cue].join("|");
+  const instruction = presenceTtsInstruction(style);
+  const key = [config.baseUrl, config.model, config.voice, config.language, config.sampleRate, cue, style].join("|");
   const existing = audioCache.get(key);
   if (existing) return existing;
-  const promise = synthesize(cue, config, timeoutMs).catch((error) => {
+  const promise = synthesize(cue, config, timeoutMs, instruction).catch((error) => {
     audioCache.delete(key);
     throw error;
   });
@@ -81,8 +94,13 @@ export async function getBackchannelAudio(
   return promise;
 }
 
-function synthesize(cue: string, config: BackchannelAudioConfig, timeoutMs: number): Promise<Buffer> {
-  const client = new QwenTtsRealtimeClient(config, "用很轻、很短、自然的熟人接话语气说，不要郑重，不要拖长，不要播音腔。");
+function synthesize(
+  cue: string,
+  config: BackchannelAudioConfig,
+  timeoutMs: number,
+  instruction: string,
+): Promise<Buffer> {
+  const client = new QwenTtsRealtimeClient(config, instruction);
   const chunks: Buffer[] = [];
   let settled = false;
 
@@ -117,6 +135,14 @@ function synthesize(cue: string, config: BackchannelAudioConfig, timeoutMs: numb
       }
     })();
   });
+}
+
+function presenceTtsInstruction(style: PresenceCueStyle): string {
+  if (style === "playful") return "像熟人自然轻笑或接话，短促真实，不要把笑声逐字朗读。";
+  if (style === "supportive") return "语气柔和真诚，轻轻接住对方，不要客服腔，不要拖长。";
+  if (style === "thoughtful") return "像真人边想边自然说出一句短话，轻、松、有呼吸感。";
+  if (style === "surprised") return "自然地表现一点好奇或惊讶，短促真实，不要夸张表演。";
+  return "用很轻、很短、自然的熟人接话语气说，不要郑重，不要拖长，不要播音腔。";
 }
 
 function hasNarrativeContinuation(text: string): boolean {

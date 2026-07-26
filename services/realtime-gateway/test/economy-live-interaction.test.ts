@@ -26,7 +26,7 @@ test("semantic turn manager protects thinking pauses and continuations", () => {
   assert.ok(softPause.commitDelayMs >= 500);
 });
 
-test("backchannel engine is conservative and one-shot per speech segment", () => {
+test("backchannel engine is contextual, non-scripted and one-shot per speech segment", () => {
   const engine = new BackchannelEngine(3_000, 10_000);
   engine.beginSpeech(1_000);
   assert.equal(engine.observe({
@@ -37,14 +37,16 @@ test("backchannel engine is conservative and one-shot per speech segment", () =>
     now: 2_000,
   }), undefined);
 
-  const cue = engine.observe({
+  const decision = engine.observe({
     text: "我当时先去了那边，然后又遇到一个朋友，后来我们就继续往前走，然后",
     emotion: "neutral",
     interactionMode: "owner_focus",
     activeResponse: false,
     now: 4_500,
   });
-  assert.equal(cue?.cue, "嗯，我在听。");
+  assert.ok(decision?.cue);
+  assert.ok(decision?.cueId);
+  assert.doesNotMatch(decision?.cue ?? "", /我在呢|你慢慢说|我在听/u);
 
   const duplicate = engine.observe({
     text: "后面还有很多事情，然后我又想起来一些细节",

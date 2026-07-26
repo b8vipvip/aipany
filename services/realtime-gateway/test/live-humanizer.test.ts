@@ -41,18 +41,21 @@ test("humanizer creates warm slower prosody for vulnerable turns", () => {
   assert.equal(result.pauseStyle, "soft");
   assert.ok(result.energy < 0.5);
   assert.match(result.ttsInstructions, /温暖|轻柔|陪伴/);
+  assert.match(result.ttsInstructions, /叹息|气口/);
   assert.match(result.responseInstruction, /短句|自然/);
+  assert.ok(result.chunking.firstChunkMaxChars <= 12);
 });
 
-test("humanizer keeps acknowledgements short and lowers first chunk threshold", () => {
+test("humanizer keeps acknowledgements short and bans scripted listening replies", () => {
   const director = new LiveHumanizer();
   const result = director.direct(context({ userText: "嗯嗯", userEmotion: "neutral" }));
 
   assert.equal(result.profileId, "micro_ack");
   assert.equal(result.backchannelStyle, "responsive");
   assert.equal(result.chunking.firstChunkMinChars, 2);
-  assert.ok(result.chunking.firstChunkMaxChars <= 10);
-  assert.match(result.responseInstruction, /很短的自然反馈/);
+  assert.ok(result.chunking.firstChunkMaxChars <= 8);
+  assert.match(result.responseInstruction, /很短.*自然反馈|一句很短.*自然反馈/u);
+  assert.match(result.responseInstruction, /我在呢|你慢慢说|我在听/u);
 });
 
 test("humanizer uses brisk focused delivery for urgent requests without panic", () => {
@@ -62,6 +65,15 @@ test("humanizer uses brisk focused delivery for urgent requests without panic", 
   assert.equal(result.profileId, "focused_urgent");
   assert.equal(result.pace, "brisk");
   assert.match(result.ttsInstructions, /专注|不要夸张|轻快|快/);
+  assert.ok(result.chunking.firstChunkMaxChars <= 10);
+});
+
+test("humanizer directs laughter as performance rather than literal reading", () => {
+  const director = new LiveHumanizer();
+  const result = director.direct(context({ userText: "哈哈哈哈，这个真的太逗了", userEmotion: "happy" }));
+
+  assert.equal(result.profileId, "bright_playful");
+  assert.match(result.ttsInstructions, /呼气轻笑|不要把笑声逐字朗读/u);
 });
 
 test("humanizer preserves warm continuity across a following unknown-emotion turn", () => {
@@ -73,13 +85,24 @@ test("humanizer preserves warm continuity across a following unknown-emotion tur
   assert.equal(next.pauseStyle, "soft");
 });
 
-test("humanizer adds context-aware initiative only at high proactivity", () => {
+test("humanizer makes high proactivity contextual rather than question-only", () => {
   const director = new LiveHumanizer();
   const active = director.direct(context({ proactivity: 0.9, secondsSinceAiSpoke: 30 }));
   const quiet = director.direct(context({ proactivity: 0.2, secondsSinceAiSpoke: 30 }));
 
-  assert.match(active.responseInstruction, /小问题/);
+  assert.match(active.responseInstruction, /小观察|小联想|真实反应/u);
+  assert.match(active.responseInstruction, /不要总用提问/u);
   assert.match(quiet.responseInstruction, /不要为了延长对话机械地/);
+});
+
+test("humanizer demands a short context-specific first clause", () => {
+  const director = new LiveHumanizer();
+  const result = director.direct(context({ userText: "因为刚刚吃完饭，才发现喉咙有点不舒服" }));
+
+  assert.match(result.responseInstruction, /第一小句/u);
+  assert.match(result.responseInstruction, /二到十个汉字|短而具体/u);
+  assert.match(result.responseInstruction, /不能用空泛/u);
+  assert.ok(result.chunking.firstChunkMaxChars <= 12);
 });
 
 test("humanizer uses low-arousal acoustic context only to soften its own delivery", () => {

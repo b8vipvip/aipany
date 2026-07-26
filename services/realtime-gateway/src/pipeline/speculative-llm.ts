@@ -33,12 +33,14 @@ export class StablePartialTracker {
 
   shouldStartEarly(): boolean {
     const candidate = this.candidate;
-    return Boolean(
-      candidate
-      && candidate.text.trim().length >= 8
-      && candidate.stableCount >= 2
-      && candidate.likelyComplete,
-    );
+    if (!candidate || candidate.text.trim().length < 8 || candidate.stableCount < 2) return false;
+    // Realtime ASR partials often omit punctuation until the final event. Waiting
+    // for a full stop made speculation start too late or not at all. A phrase is
+    // now eligible when it is explicitly complete, repeatedly stable, or already
+    // long enough to contain useful semantic context.
+    return candidate.likelyComplete
+      || candidate.stableCount >= 3
+      || candidate.text.trim().length >= 16;
   }
 
   reset(): void {
@@ -245,7 +247,7 @@ export function buildSpeculativeMessages(history: ChatMessage[], userText: strin
     { role: "user", content: userText.trim() },
     {
       role: "system",
-      content: "这是实时语音对话的预测性预生成。回答要自然、简短、口语化，先说最有用的信息，不要提及这是预测。",
+      content: "这是实时语音对话的预测性预生成。回答要自然、简短、口语化，第一小句控制在八个汉字左右并先说最有用的信息，不要提及这是预测。",
     },
   ];
 }
