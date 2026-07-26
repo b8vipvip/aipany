@@ -27,9 +27,9 @@ test("stable partial tracker starts when content stays stable and punctuation co
 
 test("stable natural partial can start speculation before final punctuation", () => {
   const tracker = new StablePartialTracker();
-  tracker.observe("因为刚刚吃完饭才发现有点不舒服");
+  tracker.observe("因为刚刚吃完饭才发现喉咙有点不舒服");
   assert.equal(tracker.shouldStartEarly(), false);
-  tracker.observe("因为刚刚吃完饭才发现有点不舒服");
+  tracker.observe("因为刚刚吃完饭才发现喉咙有点不舒服");
   assert.equal(tracker.shouldStartEarly(), true);
 
   tracker.reset();
