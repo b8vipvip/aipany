@@ -86,3 +86,47 @@ test("mismatched final transcript cancels speculation and runs normal request", 
   assert.deepEqual(output, ["新的答案"]);
   assert.equal(coordinator.stats.rejected, 1);
 });
+
+test("adopted speculation cancelled before its first token falls back to a normal response", async () => {
+  let calls = 0;
+  const original: StreamChatFunction = async ({ onDelta, traceId }) => {
+    calls += 1;
+    if (traceId?.startsWith("speculative-")) {
+      throw new DOMException("aborted", "AbortError");
+    }
+    await onDelta("这次正常回答");
+  };
+  const coordinator = new SpeculativeLlmCoordinator(original);
+  coordinator.start("你还记得刚刚的话吗", buildSpeculativeMessages(history, "你还记得刚刚的话吗"));
+
+  const output: string[] = [];
+  await coordinator.streamOrAdopt({
+    messages: [...history, { role: "user", content: "你还记得刚刚的话吗？" }],
+    signal: new AbortController().signal,
+    onDelta: (delta) => { output.push(delta); },
+  });
+
+  assert.equal(calls, 2);
+  assert.deepEqual(output, ["这次正常回答"]);
+  assert.equal(coordinator.stats.emptyRetries, 1);
+});
+
+test("a normal provider response with zero tokens is retried once", async () => {
+  let calls = 0;
+  const original: StreamChatFunction = async ({ onDelta }) => {
+    calls += 1;
+    if (calls === 2) await onDelta("重试后有回答");
+  };
+  const coordinator = new SpeculativeLlmCoordinator(original);
+  const output: string[] = [];
+
+  await coordinator.streamOrAdopt({
+    messages: [...history, { role: "user", content: "请回答我" }],
+    signal: new AbortController().signal,
+    onDelta: (delta) => { output.push(delta); },
+  });
+
+  assert.equal(calls, 2);
+  assert.deepEqual(output, ["重试后有回答"]);
+  assert.equal(coordinator.stats.emptyRetries, 1);
+});
