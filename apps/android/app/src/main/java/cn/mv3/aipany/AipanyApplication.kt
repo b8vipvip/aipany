@@ -7,12 +7,17 @@ import android.os.Bundle
 class AipanyApplication : Application(), Application.ActivityLifecycleCallbacks {
     override fun onCreate() {
         super.onCreate()
+        ClientCrashDiagnostics.install(this)
         registerActivityLifecycleCallbacks(this)
     }
 
     override fun onActivityResumed(activity: Activity) {
-        AppUpdateManager.resumePendingInstall(activity)
-        if (activity is MainActivity) AppUpdateManager.initialize(activity)
+        // Only the launcher activity owns update initialization. Settings has its
+        // own explicit update controls; avoiding duplicate resume/install calls
+        // also keeps activity transitions side-effect free.
+        if (activity is MainActivity) {
+            runCatching { AppUpdateManager.initialize(activity) }
+        }
     }
 
     override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit

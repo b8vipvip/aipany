@@ -20,11 +20,14 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import org.json.JSONObject
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import kotlin.math.roundToInt
 
 class MainActivity : Activity() {
     companion object {
         private const val RECORD_AUDIO_REQUEST = 1001
+        private const val AUDIO_START_TIMEOUT_MS = 8_000L
     }
 
     private lateinit var statusView: TextView
@@ -44,10 +47,16 @@ class MainActivity : Activity() {
     private lateinit var audioEngine: AudioEngine
 
     private val handler = Handler(Looper.getMainLooper())
+    private val audioLifecycleExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val audioStartupGuard = AudioStartupGuard(AUDIO_START_TIMEOUT_MS)
+
+    @Volatile private var destroyed = false
     private var sessionActive = false
+    private var audioReady = false
     private var connectionAttempt = false
     private var micPaused = false
     private var hasResumedOnce = false
+    private var pendingCrashUploaded = false
     private var settings = AppSettings()
     private var lastAppliedSettings = AppSettings()
     private val assistantText = StringBuilder()
@@ -147,11 +156,14 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        destroyed = true
+        audioStartupGuard.invalidate()
         responseWatchdogGeneration += 1
         handler.removeCallbacksAndMessages(null)
-        realtimeClient.release()
-        mobileApi.release()
-        audioEngine.release()
+        runCatching { realtimeClient.release() }
+        runCatching { mobileApi.release() }
+        audioLifecycleExecutor.execute { runCatching { audioEngine.release() } }
+        audioLifecycleExecutor.shutdown()
         super.onDestroy()
     }
 
@@ -176,7 +188,6 @@ class MainActivity : Activity() {
             setPadding(dp(20), dp(18), dp(20), dp(32))
             setBackgroundColor(Color.rgb(247, 248, 252))
         }
-
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -198,7 +209,10 @@ class MainActivity : Activity() {
             text = "设置"
             textSize = 14f
             background = rounded(Color.WHITE, dp(14).toFloat(), Color.rgb(226, 229, 238))
-            setOnClickListener { startActivity(Intent(this@MainActivity, SettingsActivity::class.java)) }
+            setOnClickListener {
+                runCatching { startActivity(Intent(this@MainActivity, SettingsActivity::class.java)) }
+                    .onFailure { Toast.makeText(this@MainActivity, "设置页打开失败：${it.javaClass.simpleName}", Toast.LENGTH_LONG).show() }
+            }
         }, LinearLayout.LayoutParams(dp(76), dp(46)))
         root.addView(header)
 
@@ -295,7 +309,6 @@ class MainActivity : Activity() {
             setTextColor(Color.rgb(142, 150, 168))
             setPadding(0, dp(12), 0, 0)
         })
-
         setContentView(ScrollView(this).apply { addView(root) })
     }
 
@@ -325,12 +338,14 @@ class MainActivity : Activity() {
     }
 
     private fun connectAutomatically() {
-        if (connectionAttempt || sessionActive) return
+        if (destroyed || connectionAttempt || sessionActive) return
         connectionAttempt = true
         updateStatus("正在连接小派", "自动获取安全会话", VoiceOrbView.State.CONNECTING)
-        val deviceId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID) ?: "android-device-${System.currentTimeMillis()}"
+        val deviceId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID)
+            ?: "android-device-${System.currentTimeMillis()}"
         mobileApi.bootstrap(deviceId) { result ->
             runOnUiThread {
+                if (destroyed) return@runOnUiThread
                 connectionAttempt = false
                 result.onSuccess { bootstrap ->
                     settings = AppSettings.load(this)
@@ -352,12 +367,13 @@ class MainActivity : Activity() {
     }
 
     private fun reconnect() {
+        invalidateAudioStartup()
         responseWatchdogGeneration += 1
-        audioEngine.stop()
-        realtimeClient.close()
         sessionActive = false
         connectionAttempt = false
-        handler.postDelayed({ connectAutomatically() }, 350)
+        realtimeClient.close()
+        stopAudioAsync()
+        handler.postDelayed({ connectAutomatically() }, 450)
     }
 
     private fun toggleMicrophone() {
@@ -367,41 +383,47 @@ class MainActivity : Activity() {
         }
         micPaused = !micPaused
         if (micPaused) {
-            audioEngine.stop()
+            audioReady = false
+            audioStartupGuard.invalidate()
+            stopAudioAsync()
             pauseButton.text = "继续聆听"
             updateStatus("已暂停聆听", "点继续后恢复麦克风", VoiceOrbView.State.PAUSED)
         } else {
-            audioEngine.updatePreferences(settings)
-            audioEngine.start()
             pauseButton.text = "暂停聆听"
-            updateStatus("我在听", "直接说话即可", VoiceOrbView.State.LISTENING)
+            startAudioAsync("manual_resume")
         }
     }
 
     private fun handleConnectionState(message: String) {
         if (message.startsWith("连接失败") || message == "连接已断开") {
+            invalidateAudioStartup()
             responseWatchdogGeneration += 1
             sessionActive = false
-            audioEngine.stop()
-            updateStatus("连接中断", "可以点击重新连接", VoiceOrbView.State.ERROR)
+            stopAudioAsync()
+            updateStatus("连接中断", "正在等待自动重连，也可点击重新连接", VoiceOrbView.State.ERROR)
         } else if (message.contains("正在连接") || message.contains("安全连接")) {
             updateStatus("正在连接小派", message, VoiceOrbView.State.CONNECTING)
+            if (message.contains("安全连接") && !pendingCrashUploaded) {
+                ClientCrashDiagnostics.consume(this)?.let { details ->
+                    if (realtimeClient.sendTelemetry("android_previous_crash", details = details)) {
+                        pendingCrashUploaded = true
+                    }
+                }
+            }
         }
     }
 
     private fun handleServerEvent(event: JSONObject) {
         when (event.optString("type")) {
-            "session.created" -> updateStatus("正在启动语音", "ASR 会话准备中", VoiceOrbView.State.CONNECTING)
+            "session.created" -> updateStatus("正在启动语音", "服务端 ASR 会话准备中", VoiceOrbView.State.CONNECTING)
             "session.ready" -> {
                 sessionActive = true
-                if (!micPaused) {
-                    audioEngine.updatePreferences(settings)
-                    runCatching { audioEngine.start() }.onFailure {
-                        updateStatus("麦克风启动失败", it.message ?: "未知错误", VoiceOrbView.State.ERROR)
-                        return
-                    }
+                realtimeClient.sendTelemetry("session_ready_received")
+                if (micPaused) {
+                    updateStatus("已暂停聆听", "语音会话已就绪", VoiceOrbView.State.PAUSED)
+                } else {
+                    startAudioAsync("session_ready")
                 }
-                updateStatus("我在听", "直接说话即可", if (micPaused) VoiceOrbView.State.PAUSED else VoiceOrbView.State.LISTENING)
             }
             "input_audio_buffer.speech_started" -> updateStatus("我在听", "检测到语音", VoiceOrbView.State.LISTENING)
             "input_audio_buffer.speech_stopped" -> updateStatus("正在理解", "语音输入结束", VoiceOrbView.State.THINKING)
@@ -450,8 +472,6 @@ class MainActivity : Activity() {
             "response.interrupted" -> {
                 responseWatchdogGeneration += 1
                 audioEngine.setAssistantSpeaking(false)
-                // RealtimeClient already performed the immediate pause/flush before
-                // sending response.cancel. Do not flush AudioTrack a second time.
                 updateStatus("我在听", "上一轮已被打断", VoiceOrbView.State.LISTENING)
             }
             "mode.changed" -> refreshSettingsSummary()
@@ -467,6 +487,71 @@ class MainActivity : Activity() {
                 }
             }
         }
+    }
+
+    private fun startAudioAsync(reason: String) {
+        if (destroyed || micPaused || !sessionActive) return
+        val token = audioStartupGuard.begin(SystemClock.elapsedRealtime())
+        audioReady = false
+        updateStatus("正在启动麦克风", "语音会话已就绪，正在连接手机音频设备", VoiceOrbView.State.CONNECTING)
+        realtimeClient.sendTelemetry("audio_start_requested", details = mapOf("reason" to reason))
+
+        handler.postDelayed({
+            if (destroyed || !audioStartupGuard.isTimedOut(token, SystemClock.elapsedRealtime())) return@postDelayed
+            audioStartupGuard.markFailed(token)
+            audioReady = false
+            sessionActive = false
+            realtimeClient.sendTelemetry("audio_start_timeout", (SystemClock.elapsedRealtime() - token.startedAtMs).toDouble())
+            updateStatus("麦克风启动超时", "正在自动重建语音链路，界面不会再卡死", VoiceOrbView.State.ERROR)
+            realtimeClient.close()
+            connectionAttempt = false
+            handler.postDelayed({ connectAutomatically() }, 800)
+        }, AUDIO_START_TIMEOUT_MS)
+
+        audioLifecycleExecutor.execute {
+            val result = runCatching {
+                audioEngine.updatePreferences(settings)
+                audioEngine.start()
+            }
+            val elapsed = SystemClock.elapsedRealtime() - token.startedAtMs
+            if (destroyed || !audioStartupGuard.isCurrent(token)) {
+                runCatching { audioEngine.stop() }
+                return@execute
+            }
+            runOnUiThread {
+                if (destroyed) return@runOnUiThread
+                result.onSuccess {
+                    if (!audioStartupGuard.markReady(token)) return@onSuccess
+                    audioReady = true
+                    realtimeClient.sendTelemetry("audio_start_ready", elapsed.toDouble())
+                    if (micPaused) {
+                        audioReady = false
+                        stopAudioAsync()
+                        updateStatus("已暂停聆听", "语音会话已就绪", VoiceOrbView.State.PAUSED)
+                    } else {
+                        updateStatus("我在听", "直接说话即可", VoiceOrbView.State.LISTENING)
+                    }
+                }.onFailure { error ->
+                    audioStartupGuard.markFailed(token)
+                    audioReady = false
+                    realtimeClient.sendTelemetry(
+                        "audio_start_failed",
+                        elapsed.toDouble(),
+                        mapOf("errorType" to error.javaClass.simpleName.take(60)),
+                    )
+                    updateStatus("麦克风启动失败", "${error.javaClass.simpleName}：请点重新连接", VoiceOrbView.State.ERROR)
+                }
+            }
+        }
+    }
+
+    private fun invalidateAudioStartup() {
+        audioStartupGuard.invalidate()
+        audioReady = false
+    }
+
+    private fun stopAudioAsync() {
+        audioLifecycleExecutor.execute { runCatching { audioEngine.stop() } }
     }
 
     private fun updateStatus(title: String, subtitle: String, state: VoiceOrbView.State) {

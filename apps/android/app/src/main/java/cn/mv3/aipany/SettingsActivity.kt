@@ -12,6 +12,7 @@ import android.provider.Settings
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
@@ -46,29 +47,33 @@ class SettingsActivity : Activity() {
     private var previewToken: String? = null
     private var previewTrack: AudioTrack? = null
     private var loadingValues = true
+    private var initialized = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         mobileApi = MobileApiClient()
-        experienceModes = ClientCapabilitiesCache.loadExperienceModes(this)
-        val initial = AppSettings.load(this)
-        voices = selectedMode(initial.experienceMode)?.voices.orEmpty()
-            .ifEmpty { ClientCapabilitiesCache.loadVoices(this) }
-        buildUi()
-        loadValues(initial)
-        loadingValues = false
-    }
-
-    override fun onResume() {
-        super.onResume()
-        AppUpdateManager.resumePendingInstall(this)
+        val result = runCatching {
+            val initial = AppSettings.load(this)
+            experienceModes = ClientCapabilitiesCache.loadExperienceModes(this)
+                .filter { it.id.isNotBlank() }
+            require(experienceModes.isNotEmpty()) { "实时体验模式列表为空" }
+            voices = selectedMode(initial.experienceMode)?.voices.orEmpty()
+                .ifEmpty { ClientCapabilitiesCache.loadVoices(this) }
+                .filter { it.id.isNotBlank() }
+            buildUi()
+            loadValues(initial)
+            installListeners()
+            loadingValues = false
+            initialized = true
+        }
+        result.onFailure { showRecoveryScreen(it) }
     }
 
     override fun onDestroy() {
-        previewTrack?.stopSafely()
-        previewTrack?.release()
+        runCatching { previewTrack?.stopSafely() }
+        runCatching { previewTrack?.release() }
         previewTrack = null
-        mobileApi.release()
+        if (::mobileApi.isInitialized) runCatching { mobileApi.release() }
         super.onDestroy()
     }
 
@@ -78,55 +83,33 @@ class SettingsActivity : Activity() {
             setPadding(dp(18), dp(16), dp(18), dp(34))
             setBackgroundColor(PAGE_BG)
         }
-
         page.addView(buildHeader())
 
         val experienceCard = sectionCard(
-            parent = page,
-            eyebrow = "REALTIME EXPERIENCE",
-            title = "实时体验模式",
-            subtitle = "在低成本级联链路和原生全双工语音之间切换",
+            page,
+            "实时体验模式",
+            "在 Economy Live 与服务器已启用的原生实时语音之间切换。",
         )
+        fieldLabel(experienceCard, "体验模式")
         experienceSpinner = styledSpinner(experienceModes.map { it.title })
-        experienceCard.addView(experienceSpinner, matchWrap(top = 14))
+        experienceCard.addView(experienceSpinner, matchWrap(top = 6))
         experienceDescription = bodyText()
-        experienceCard.addView(experienceDescription, matchWrap(top = 10))
-        experienceSpinner.setOnItemSelectedListener(SimpleItemSelectedListener { position ->
-            val selected = experienceModes.getOrNull(position) ?: return@SimpleItemSelectedListener
-            experienceDescription.text = buildString {
-                append(selected.subtitle)
-                append("\n模型 · ")
-                append(selected.model)
-            }
-            refreshVoicesForMode(selected, preserveVoice = !loadingValues)
-        })
+        experienceCard.addView(experienceDescription, matchWrap(top = 9))
 
-        val voiceCard = sectionCard(
-            parent = page,
-            eyebrow = "VOICE",
-            title = "声音与试听",
-            subtitle = "音色列表随当前体验模式自动变化，试听使用真实云端模型",
-        )
+        fieldLabel(experienceCard, "声音")
         voiceSpinner = styledSpinner(voices.map { it.displayName() })
-        voiceCard.addView(voiceSpinner, matchWrap(top = 14))
+        experienceCard.addView(voiceSpinner, matchWrap(top = 6))
         voiceDescription = bodyText()
-        voiceCard.addView(voiceDescription, matchWrap(top = 10))
-        voiceSpinner.setOnItemSelectedListener(SimpleItemSelectedListener { position ->
-            voiceDescription.text = voices.getOrNull(position)?.description.orEmpty()
-            updatePreviewButton()
-        })
-        previewButton = primaryButton("试听当前音色").apply {
-            setOnClickListener { previewSelectedVoice() }
-        }
-        voiceCard.addView(previewButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)).apply {
-            topMargin = dp(14)
+        experienceCard.addView(voiceDescription, matchWrap(top = 9))
+        previewButton = secondaryButton("试听当前音色")
+        experienceCard.addView(previewButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)).apply {
+            topMargin = dp(12)
         })
 
         val conversationCard = sectionCard(
-            parent = page,
-            eyebrow = "CONVERSATION",
-            title = "对话方式",
-            subtitle = "控制小派如何参与、什么时候主动回应，以及如何识别你的称呼",
+            page,
+            "对话方式",
+            "控制小派如何参与、主动回应和识别称呼。",
         )
         fieldLabel(conversationCard, "交互模式")
         modeSpinner = styledSpinner(listOf("自动判断", "专注主人", "多人聊天"))
@@ -145,18 +128,9 @@ class SettingsActivity : Activity() {
         proactivityValue = valueBadge()
         proactivityHeader.addView(proactivityValue)
         conversationCard.addView(proactivityHeader, matchWrap(top = 18))
-        proactivitySeek = SeekBar(this).apply {
-            max = 100
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                    proactivityValue.text = "$progress%"
-                }
-                override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
-                override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
-            })
-        }
+        proactivitySeek = SeekBar(this).apply { max = 100 }
         conversationCard.addView(proactivitySeek, matchWrap(top = 4))
-        conversationCard.addView(hintText("数值越高，小派越愿意主动接话、追问和参与多人对话。"), matchWrap(top = 2))
+        conversationCard.addView(hintText("数值越高，小派越愿意自然参与；不会再用固定“我在听”话术刷存在感。"), matchWrap(top = 2))
 
         fieldLabel(conversationCard, "唤醒名 / 助手别名")
         aliasesInput = EditText(this).apply {
@@ -169,56 +143,51 @@ class SettingsActivity : Activity() {
         conversationCard.addView(aliasesInput, matchWrap(top = 6))
 
         val realtimeCard = sectionCard(
-            parent = page,
-            eyebrow = "LIVE CONTROL",
-            title = "实时控制",
-            subtitle = "优化断句、打断和转写显示，适应不同环境与使用习惯",
+            page,
+            "实时控制",
+            "调整断句、打断和转写显示。",
         )
         fieldLabel(realtimeCard, "本地自动断句")
         endpointSpinner = styledSpinner(EndpointProfile.entries.map { "${it.title} · ${it.subtitle}" })
         realtimeCard.addView(endpointSpinner, matchWrap(top = 6))
         bargeInSwitch = settingsSwitch(
             realtimeCard,
-            title = "允许随时打断小派",
-            subtitle = "检测到你开口后立即停止当前语音并进入新一轮",
-            checked = true,
+            "允许随时打断小派",
+            "检测到你开口后立即停止当前语音。",
+            true,
         )
         transcriptSwitch = settingsSwitch(
             realtimeCard,
-            title = "显示实时识别文字",
-            subtitle = "在主界面显示你的转写内容，方便检查识别准确度",
-            checked = true,
+            "显示实时识别文字",
+            "在主界面显示转写内容。",
+            true,
         )
 
         val updateCard = sectionCard(
-            parent = page,
-            eyebrow = "ABOUT & UPDATE",
-            title = "关于 Aipany",
-            subtitle = "版本更新由 GitHub Release 安全分发，安装前会校验 APK 完整性",
+            page,
+            "关于与更新",
+            "GitHub Release 分发，下载完成后校验 APK 完整性。",
         )
         updateCard.addView(infoRow("当前版本", "${BuildConfig.VERSION_NAME}  (${BuildConfig.VERSION_CODE})"), matchWrap(top = 8))
         updateCard.addView(infoRow("更新通道", if (BuildConfig.DEBUG) "开发调试版" else "开发预览版"), matchWrap(top = 4))
         autoUpdateSwitch = settingsSwitch(
             updateCard,
-            title = "自动检查新版本",
-            subtitle = "启动应用时检查，并由系统定期在联网状态下后台检查",
-            checked = AppUpdateManager.isAutoCheckEnabled(this),
-        ).apply {
-            setOnCheckedChangeListener { _, checked -> AppUpdateManager.setAutoCheckEnabled(this@SettingsActivity, checked) }
-        }
-        updateCard.addView(secondaryButton("检查更新").apply {
-            setOnClickListener { AppUpdateManager.checkForUpdate(this@SettingsActivity, interactive = true) }
-        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)).apply { topMargin = dp(14) })
-        updateCard.addView(
-            hintText("更新包会自动下载并校验 SHA-256。Android 出于安全限制，安装时仍会显示系统确认界面。"),
-            matchWrap(top = 10),
+            "自动检查新版本",
+            "启动应用及联网后台任务会检查更新。",
+            runCatching { AppUpdateManager.isAutoCheckEnabled(this) }.getOrDefault(true),
         )
+        updateCard.addView(secondaryButton("检查更新").apply {
+            setOnClickListener {
+                runCatching { AppUpdateManager.checkForUpdate(this@SettingsActivity, interactive = true) }
+                    .onFailure { showToast("检查更新启动失败：${it.javaClass.simpleName}") }
+            }
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)).apply { topMargin = dp(14) })
 
         page.addView(primaryButton("保存并应用设置").apply {
             textSize = 16f
             setOnClickListener { saveAndFinish() }
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)).apply { topMargin = dp(22) })
-        page.addView(hintText("保存后主界面会自动重新连接，使体验模式、音色和实时控制立即生效。").apply {
+        page.addView(hintText("保存后主界面会重新建立语音会话，使模式、音色和实时控制立即生效。").apply {
             gravity = Gravity.CENTER
         }, matchWrap(top = 10))
 
@@ -228,47 +197,34 @@ class SettingsActivity : Activity() {
         })
     }
 
-    private fun buildHeader(): View {
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            addView(Button(this@SettingsActivity).apply {
-                text = "‹"
-                textSize = 28f
-                setTextColor(TEXT_PRIMARY)
-                background = rounded(Color.WHITE, dp(14).toFloat(), BORDER)
-                setOnClickListener { finish() }
-            }, LinearLayout.LayoutParams(dp(52), dp(48)).apply { marginEnd = dp(12) })
-            addView(LinearLayout(this@SettingsActivity).apply {
-                orientation = LinearLayout.VERTICAL
-                addView(TextView(this@SettingsActivity).apply {
-                    text = "小派设置"
-                    textSize = 27f
-                    setTextColor(TEXT_PRIMARY)
-                    setTypeface(typeface, Typeface.BOLD)
-                })
-                addView(TextView(this@SettingsActivity).apply {
-                    text = "语音体验、对话偏好与应用更新"
-                    textSize = 13f
-                    setTextColor(TEXT_SECONDARY)
-                    setPadding(0, dp(3), 0, 0)
-                })
-            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            addView(TextView(this@SettingsActivity).apply {
-                text = "DEV"
-                textSize = 11f
-                gravity = Gravity.CENTER
-                setTextColor(ACCENT)
-                setTypeface(typeface, Typeface.BOLD)
-                background = rounded(ACCENT_SOFT, dp(18).toFloat())
-                setPadding(dp(12), dp(7), dp(12), dp(7))
-            })
+    private fun installListeners() {
+        experienceSpinner.onItemSelectedListener = SimpleItemSelectedListener { position ->
+            val selected = experienceModes.getOrNull(position) ?: return@SimpleItemSelectedListener
+            experienceDescription.text = "${selected.subtitle}\n模型 · ${selected.model}"
+            refreshVoicesForMode(selected, preserveVoice = !loadingValues)
+        }
+        voiceSpinner.onItemSelectedListener = SimpleItemSelectedListener { position ->
+            voiceDescription.text = voices.getOrNull(position)?.description.orEmpty()
+            updatePreviewButton()
+        }
+        proactivitySeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                proactivityValue.text = "$progress%"
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
+            override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
+        })
+        previewButton.setOnClickListener { previewSelectedVoice() }
+        autoUpdateSwitch.setOnCheckedChangeListener { _, checked ->
+            if (loadingValues) return@setOnCheckedChangeListener
+            runCatching { AppUpdateManager.setAutoCheckEnabled(this, checked) }
+                .onFailure { showToast("更新设置保存失败：${it.javaClass.simpleName}") }
         }
     }
 
     private fun loadValues(settings: AppSettings) {
         val modePosition = experienceModes.indexOfFirst { it.id == settings.experienceMode }.takeIf { it >= 0 } ?: 0
-        experienceSpinner.setSelection(modePosition)
+        experienceSpinner.setSelection(modePosition, false)
         experienceModes.getOrNull(modePosition)?.let { mode ->
             experienceDescription.text = "${mode.subtitle}\n模型 · ${mode.model}"
             refreshVoicesForMode(mode, preserveVoice = false, preferredVoice = settings.voiceId)
@@ -279,14 +235,15 @@ class SettingsActivity : Activity() {
                 "group" -> 2
                 else -> 0
             },
+            false,
         )
         proactivitySeek.progress = (settings.socialProactivity * 100).roundToInt()
         proactivityValue.text = "${proactivitySeek.progress}%"
         aliasesInput.setText(settings.assistantAliases)
-        endpointSpinner.setSelection(EndpointProfile.entries.indexOf(settings.endpointProfile).coerceAtLeast(0))
+        endpointSpinner.setSelection(EndpointProfile.entries.indexOf(settings.endpointProfile).coerceAtLeast(0), false)
         bargeInSwitch.isChecked = settings.bargeInEnabled
         transcriptSwitch.isChecked = settings.showTranscript
-        autoUpdateSwitch.isChecked = AppUpdateManager.isAutoCheckEnabled(this)
+        autoUpdateSwitch.isChecked = runCatching { AppUpdateManager.isAutoCheckEnabled(this) }.getOrDefault(true)
         updatePreviewButton()
     }
 
@@ -300,20 +257,25 @@ class SettingsActivity : Activity() {
         } else {
             preferredVoice
         }
-        voices = mode.voices
+        voices = mode.voices.filter { it.id.isNotBlank() }
+            .ifEmpty { ClientCapabilitiesCache.loadVoices(this).filter { it.id.isNotBlank() } }
         if (!::voiceSpinner.isInitialized) return
         voiceSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, voices.map { it.displayName() })
-        val target = previous?.takeIf { value -> voices.any { it.id == value } } ?: mode.defaultVoice
-        voiceSpinner.setSelection(voices.indexOfFirst { it.id == target }.coerceAtLeast(0))
-        voiceDescription.text = voices.getOrNull(voiceSpinner.selectedItemPosition)?.description.orEmpty()
+        val target = previous?.takeIf { value -> voices.any { it.id == value } }
+            ?: mode.defaultVoice.takeIf { value -> voices.any { it.id == value } }
+            ?: voices.firstOrNull()?.id
+        val position = voices.indexOfFirst { it.id == target }.coerceAtLeast(0)
+        voiceSpinner.setSelection(position, false)
+        voiceDescription.text = voices.getOrNull(position)?.description.orEmpty()
         updatePreviewButton()
     }
 
     private fun previewSelectedVoice() {
+        if (!initialized) return
         val mode = experienceModes.getOrNull(experienceSpinner.selectedItemPosition) ?: return
         val voice = voices.getOrNull(voiceSpinner.selectedItemPosition) ?: return
         if (!voice.previewable) {
-            Toast.makeText(this, "当前模型暂不支持独立音色试听", Toast.LENGTH_SHORT).show()
+            showToast("当前模型暂不支持独立音色试听")
             return
         }
         previewButton.isEnabled = false
@@ -322,17 +284,19 @@ class SettingsActivity : Activity() {
             tokenResult.onSuccess { token ->
                 mobileApi.previewVoice(token, mode.model, voice.id) { result ->
                     runOnUiThread {
+                        if (isFinishing || isDestroyed) return@runOnUiThread
                         previewButton.isEnabled = true
                         previewButton.text = "试听当前音色"
                         result.onSuccess { playPreview(it) }
-                            .onFailure { Toast.makeText(this, it.message ?: "音色试听失败", Toast.LENGTH_LONG).show() }
+                            .onFailure { showToast(it.message ?: "音色试听失败") }
                     }
                 }
-            }.onFailure {
+            }.onFailure { error ->
                 runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
                     previewButton.isEnabled = true
                     previewButton.text = "试听当前音色"
-                    Toast.makeText(this, it.message ?: "无法获取试听会话", Toast.LENGTH_LONG).show()
+                    showToast(error.message ?: "无法获取试听会话")
                 }
             }
         }
@@ -354,55 +318,51 @@ class SettingsActivity : Activity() {
     }
 
     private fun playPreview(audio: ByteArray) {
-        previewTrack?.stopSafely()
-        previewTrack?.release()
-        val minBuffer = AudioTrack.getMinBufferSize(
-            PREVIEW_SAMPLE_RATE,
-            AudioFormat.CHANNEL_OUT_MONO,
-            AudioFormat.ENCODING_PCM_16BIT,
-        ).coerceAtLeast(audio.size)
-        val track = AudioTrack.Builder()
-            .setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .build(),
-            )
-            .setAudioFormat(
-                AudioFormat.Builder()
-                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                    .setSampleRate(PREVIEW_SAMPLE_RATE)
-                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                    .build(),
-            )
-            .setBufferSizeInBytes(minBuffer)
-            .setTransferMode(AudioTrack.MODE_STATIC)
-            .build()
-        val written = track.write(audio, 0, audio.size)
-        if (written <= 0) {
-            track.release()
-            Toast.makeText(this, "试听音频播放失败", Toast.LENGTH_SHORT).show()
-            return
-        }
-        previewTrack = track
-        track.play()
+        runCatching {
+            previewTrack?.stopSafely()
+            previewTrack?.release()
+            val minBuffer = AudioTrack.getMinBufferSize(
+                PREVIEW_SAMPLE_RATE,
+                AudioFormat.CHANNEL_OUT_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+            ).coerceAtLeast(audio.size)
+            val track = AudioTrack.Builder()
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build(),
+                )
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setSampleRate(PREVIEW_SAMPLE_RATE)
+                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                        .build(),
+                )
+                .setBufferSizeInBytes(minBuffer)
+                .setTransferMode(AudioTrack.MODE_STATIC)
+                .build()
+            check(track.state == AudioTrack.STATE_INITIALIZED) { "AudioTrack 未初始化" }
+            check(track.write(audio, 0, audio.size) > 0) { "试听音频写入失败" }
+            previewTrack = track
+            track.play()
+        }.onFailure { showToast("试听音频播放失败：${it.javaClass.simpleName}") }
     }
 
     private fun updatePreviewButton() {
         if (!::previewButton.isInitialized || !::voiceSpinner.isInitialized) return
-        val voice = voices.getOrNull(voiceSpinner.selectedItemPosition)
-        val available = voice?.previewable == true
+        val available = voices.getOrNull(voiceSpinner.selectedItemPosition)?.previewable == true
         previewButton.isEnabled = available
         previewButton.alpha = if (available) 1f else 0.48f
         previewButton.text = if (available) "试听当前音色" else "当前音色暂不可试听"
     }
 
     private fun saveAndFinish() {
-        val current = AppSettings.load(this)
-        val experience = experienceModes.getOrNull(experienceSpinner.selectedItemPosition)
-        AppSettings.save(
-            this,
-            current.copy(
+        val result = runCatching {
+            val current = AppSettings.load(this)
+            val experience = experienceModes.getOrNull(experienceSpinner.selectedItemPosition)
+            val value = current.copy(
                 experienceMode = experience?.id ?: current.experienceMode,
                 voiceId = voices.getOrNull(voiceSpinner.selectedItemPosition)?.id ?: current.voiceId,
                 interactionMode = when (modeSpinner.selectedItemPosition) {
@@ -415,48 +375,92 @@ class SettingsActivity : Activity() {
                 endpointProfile = EndpointProfile.entries.getOrElse(endpointSpinner.selectedItemPosition) { EndpointProfile.BALANCED },
                 bargeInEnabled = bargeInSwitch.isChecked,
                 showTranscript = transcriptSwitch.isChecked,
-            ),
-        )
-        AppUpdateManager.setAutoCheckEnabled(this, autoUpdateSwitch.isChecked)
-        setResult(RESULT_OK)
-        finish()
+            )
+            AppSettings.save(this, value)
+            runCatching { AppUpdateManager.setAutoCheckEnabled(this, autoUpdateSwitch.isChecked) }
+            setResult(RESULT_OK)
+            finish()
+        }
+        result.onFailure { showToast("设置保存失败：${it.javaClass.simpleName}") }
+    }
+
+    private fun showRecoveryScreen(error: Throwable) {
+        initialized = false
+        val page = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(24), dp(36), dp(24), dp(36))
+            setBackgroundColor(PAGE_BG)
+            addView(TextView(this@SettingsActivity).apply {
+                text = "设置页已安全恢复"
+                textSize = 24f
+                setTypeface(typeface, Typeface.BOLD)
+                setTextColor(TEXT_PRIMARY)
+            })
+            addView(TextView(this@SettingsActivity).apply {
+                text = "某项本地配置未能加载，APP没有退出。错误类型：${error.javaClass.simpleName}"
+                textSize = 14f
+                gravity = Gravity.CENTER
+                setTextColor(TEXT_SECONDARY)
+                setPadding(0, dp(14), 0, dp(20))
+            })
+            addView(primaryButton("恢复默认设置并返回").apply {
+                setOnClickListener {
+                    AppSettings.save(this@SettingsActivity, AppSettings())
+                    finish()
+                }
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(54)))
+            addView(secondaryButton("关闭设置页").apply { setOnClickListener { finish() } },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)).apply { topMargin = dp(12) })
+        }
+        setContentView(page)
+    }
+
+    private fun buildHeader(): View = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        addView(Button(this@SettingsActivity).apply {
+            text = "‹"
+            textSize = 28f
+            setTextColor(TEXT_PRIMARY)
+            background = rounded(Color.WHITE, dp(14).toFloat(), BORDER)
+            setOnClickListener { finish() }
+        }, LinearLayout.LayoutParams(dp(52), dp(48)).apply { marginEnd = dp(12) })
+        addView(LinearLayout(this@SettingsActivity).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(TextView(this@SettingsActivity).apply {
+                text = "小派设置"
+                textSize = 27f
+                setTextColor(TEXT_PRIMARY)
+                setTypeface(typeface, Typeface.BOLD)
+            })
+            addView(TextView(this@SettingsActivity).apply {
+                text = "语音体验、对话偏好与应用更新"
+                textSize = 13f
+                setTextColor(TEXT_SECONDARY)
+            })
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
     }
 
     private fun selectedMode(id: String): ClientExperienceModeOption? = experienceModes.firstOrNull { it.id == id }
 
-    private fun sectionCard(
-        parent: LinearLayout,
-        eyebrow: String,
-        title: String,
-        subtitle: String,
-    ): LinearLayout {
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(18), dp(18), dp(18))
-            background = rounded(Color.WHITE, dp(22).toFloat(), CARD_BORDER)
-            addView(TextView(this@SettingsActivity).apply {
-                text = eyebrow
-                textSize = 10f
-                letterSpacing = 0.12f
-                setTextColor(ACCENT)
-                setTypeface(typeface, Typeface.BOLD)
-            })
-            addView(TextView(this@SettingsActivity).apply {
-                text = title
-                textSize = 20f
-                setTextColor(TEXT_PRIMARY)
-                setTypeface(typeface, Typeface.BOLD)
-                setPadding(0, dp(5), 0, 0)
-            })
-            addView(TextView(this@SettingsActivity).apply {
-                text = subtitle
-                textSize = 12f
-                setTextColor(TEXT_SECONDARY)
-                setLineSpacing(0f, 1.12f)
-                setPadding(0, dp(5), 0, dp(2))
-            })
-            parent.addView(this, matchWrap(top = 16))
-        }
+    private fun sectionCard(parent: LinearLayout, title: String, subtitle: String): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(18), dp(18), dp(18), dp(18))
+        background = rounded(Color.WHITE, dp(22).toFloat(), CARD_BORDER)
+        addView(TextView(this@SettingsActivity).apply {
+            text = title
+            textSize = 20f
+            setTextColor(TEXT_PRIMARY)
+            setTypeface(typeface, Typeface.BOLD)
+        })
+        addView(TextView(this@SettingsActivity).apply {
+            text = subtitle
+            textSize = 12f
+            setTextColor(TEXT_SECONDARY)
+            setPadding(0, dp(5), 0, 0)
+        })
+        parent.addView(this, matchWrap(top = 16))
     }
 
     private fun styledSpinner(items: List<String>): Spinner = Spinner(this).apply {
@@ -500,7 +504,6 @@ class SettingsActivity : Activity() {
     private fun infoRow(label: String, value: String): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
-        setPadding(0, dp(5), 0, dp(5))
         addView(TextView(this@SettingsActivity).apply {
             text = label
             textSize = 13f
@@ -533,7 +536,6 @@ class SettingsActivity : Activity() {
                     text = subtitle
                     textSize = 11f
                     setTextColor(TEXT_MUTED)
-                    setLineSpacing(0f, 1.1f)
                     setPadding(0, dp(3), dp(12), 0)
                 })
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
@@ -570,6 +572,7 @@ class SettingsActivity : Activity() {
         ViewGroup.LayoutParams.WRAP_CONTENT,
     ).apply { topMargin = dp(top) }
 
+    private fun showToast(message: String) = Toast.makeText(this, message, Toast.LENGTH_LONG).show()
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).roundToInt()
 
     companion object {
@@ -592,7 +595,7 @@ private fun AudioTrack.stopSafely() {
 
 private class SimpleItemSelectedListener(
     private val onSelected: (Int) -> Unit,
-) : android.widget.AdapterView.OnItemSelectedListener {
-    override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) = onSelected(position)
-    override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
+) : AdapterView.OnItemSelectedListener {
+    override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) = onSelected(position)
+    override fun onNothingSelected(parent: AdapterView<*>?) = Unit
 }
