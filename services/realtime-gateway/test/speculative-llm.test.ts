@@ -25,6 +25,20 @@ test("stable partial tracker starts when content stays stable and punctuation co
   assert.equal(tracker.shouldStartEarly(), false);
 });
 
+test("stable natural partial can start speculation before final punctuation", () => {
+  const tracker = new StablePartialTracker();
+  tracker.observe("因为刚刚吃完饭才发现有点不舒服");
+  assert.equal(tracker.shouldStartEarly(), false);
+  tracker.observe("因为刚刚吃完饭才发现有点不舒服");
+  assert.equal(tracker.shouldStartEarly(), true);
+
+  tracker.reset();
+  tracker.observe("这个问题我想请你仔细帮我分析一下");
+  tracker.observe("这个问题我想请你仔细帮我分析一下");
+  tracker.observe("这个问题我想请你仔细帮我分析一下");
+  assert.equal(tracker.shouldStartEarly(), true);
+});
+
 test("text similarity accepts final punctuation and small ASR corrections", () => {
   assert.ok(textSimilarity("帮我看看明天的天气", "帮我看看明天天气。") >= 0.86);
   assert.ok(textSimilarity("我想去广州", "完全不相关的问题") < 0.86);
