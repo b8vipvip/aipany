@@ -2,7 +2,9 @@ name: Deploy production via SSH
 
 on:
   workflow_dispatch:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
 
 concurrency:
@@ -14,7 +16,10 @@ permissions:
 
 jobs:
   deploy:
-    if: github.event_name == 'workflow_dispatch' || vars.AIPANY_SSH_DEPLOY_ENABLED == 'true'
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (vars.AIPANY_SSH_DEPLOY_ENABLED == 'true' &&
+       github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     environment:
@@ -22,10 +27,26 @@ jobs:
       url: ${{ vars.AIPANY_PRODUCTION_URL || 'https://aipany.mv3.cn' }}
 
     steps:
+      - name: Resolve exact release SHA
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_run" ]]; then
+            release_sha="${{ github.event.workflow_run.head_sha }}"
+          else
+            release_sha="${GITHUB_SHA}"
+          fi
+          [[ "${release_sha}" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::Unable to resolve a full release SHA"
+            exit 1
+          }
+          echo "sha=${release_sha}" >> "${GITHUB_OUTPUT}"
+
       - name: Check out exact release
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ steps.release.outputs.sha }}
           persist-credentials: false
 
       - name: Validate deployment configuration
@@ -103,7 +124,7 @@ jobs:
         shell: bash
         env:
           DEPLOY_PATH: ${{ vars.AIPANY_DEPLOY_PATH || '/opt/aipany' }}
-          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
         run: |
           set -euo pipefail
           remote_incoming="${DEPLOY_PATH}/.deploy/incoming/${RELEASE_SHA}"
@@ -123,7 +144,7 @@ jobs:
         shell: bash
         env:
           DEPLOY_PATH: ${{ vars.AIPANY_DEPLOY_PATH || '/opt/aipany' }}
-          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
           PRODUCTION_URL: ${{ vars.AIPANY_PRODUCTION_URL || 'https://aipany.mv3.cn' }}
         run: |
           set -euo pipefail
