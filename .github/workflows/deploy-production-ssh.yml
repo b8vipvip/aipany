@@ -1,0 +1,146 @@
+name: Deploy production via SSH
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+concurrency:
+  group: aipany-production-ssh
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    if: github.event_name == 'workflow_dispatch' || vars.AIPANY_SSH_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment:
+      name: production
+      url: ${{ vars.AIPANY_PRODUCTION_URL || 'https://aipany.mv3.cn' }}
+
+    steps:
+      - name: Check out exact release
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Validate deployment configuration
+        shell: bash
+        env:
+          VPS_HOST: ${{ vars.AIPANY_VPS_HOST }}
+          VPS_PORT: ${{ vars.AIPANY_VPS_PORT || '22' }}
+          VPS_USER: ${{ vars.AIPANY_VPS_USER || 'aipany-deploy' }}
+          DEPLOY_PATH: ${{ vars.AIPANY_DEPLOY_PATH || '/opt/aipany' }}
+          SSH_PRIVATE_KEY: ${{ secrets.AIPANY_SSH_PRIVATE_KEY }}
+          SSH_HOST_KEY: ${{ secrets.AIPANY_SSH_HOST_KEY }}
+        run: |
+          set -euo pipefail
+
+          missing=0
+          for name in VPS_HOST VPS_USER DEPLOY_PATH SSH_PRIVATE_KEY SSH_HOST_KEY; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::Missing GitHub Actions configuration: ${name}"
+              missing=1
+            fi
+          done
+          (( missing == 0 )) || exit 1
+
+          [[ "${VPS_HOST}" =~ ^[A-Za-z0-9.-]+$ ]] || {
+            echo "::error::AIPANY_VPS_HOST contains unsupported characters"
+            exit 1
+          }
+          [[ "${VPS_PORT}" =~ ^[0-9]{1,5}$ ]] && (( VPS_PORT >= 1 && VPS_PORT <= 65535 )) || {
+            echo "::error::AIPANY_VPS_PORT must be between 1 and 65535"
+            exit 1
+          }
+          [[ "${VPS_USER}" =~ ^[a-z_][a-z0-9_-]*$ ]] || {
+            echo "::error::AIPANY_VPS_USER is invalid"
+            exit 1
+          }
+          [[ "${DEPLOY_PATH}" =~ ^/[A-Za-z0-9._/-]+$ ]] || {
+            echo "::error::AIPANY_DEPLOY_PATH must be a safe absolute path"
+            exit 1
+          }
+
+      - name: Configure pinned SSH trust
+        shell: bash
+        env:
+          VPS_HOST: ${{ vars.AIPANY_VPS_HOST }}
+          VPS_PORT: ${{ vars.AIPANY_VPS_PORT || '22' }}
+          VPS_USER: ${{ vars.AIPANY_VPS_USER || 'aipany-deploy' }}
+          SSH_PRIVATE_KEY: ${{ secrets.AIPANY_SSH_PRIVATE_KEY }}
+          SSH_HOST_KEY: ${{ secrets.AIPANY_SSH_HOST_KEY }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 "${HOME}/.ssh"
+          printf '%s\n' "${SSH_PRIVATE_KEY}" | tr -d '\r' > "${HOME}/.ssh/aipany_deploy"
+          printf '%s\n' "${SSH_HOST_KEY}" | tr -d '\r' > "${HOME}/.ssh/known_hosts"
+          chmod 600 "${HOME}/.ssh/aipany_deploy" "${HOME}/.ssh/known_hosts"
+
+          cat > "${HOME}/.ssh/config" <<EOF
+          Host aipany-production
+            HostName ${VPS_HOST}
+            Port ${VPS_PORT}
+            User ${VPS_USER}
+            IdentityFile ${HOME}/.ssh/aipany_deploy
+            IdentitiesOnly yes
+            BatchMode yes
+            StrictHostKeyChecking yes
+            UserKnownHostsFile ${HOME}/.ssh/known_hosts
+            ConnectTimeout 20
+            ServerAliveInterval 30
+            ServerAliveCountMax 4
+          EOF
+          chmod 600 "${HOME}/.ssh/config"
+
+          ssh aipany-production 'printf "ssh-ready\n"'
+
+      - name: Upload immutable release source
+        shell: bash
+        env:
+          DEPLOY_PATH: ${{ vars.AIPANY_DEPLOY_PATH || '/opt/aipany' }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          remote_incoming="${DEPLOY_PATH}/.deploy/incoming/${RELEASE_SHA}"
+          ssh aipany-production "mkdir -p '${remote_incoming}'"
+
+          rsync -az --delete \
+            --exclude '.git/' \
+            --exclude '.env' \
+            --exclude 'node_modules/' \
+            --exclude 'dist/' \
+            --exclude 'coverage/' \
+            --exclude '*.log' \
+            -e ssh \
+            ./ "aipany-production:${remote_incoming}/"
+
+      - name: Activate release on VPS
+        shell: bash
+        env:
+          DEPLOY_PATH: ${{ vars.AIPANY_DEPLOY_PATH || '/opt/aipany' }}
+          RELEASE_SHA: ${{ github.sha }}
+          PRODUCTION_URL: ${{ vars.AIPANY_PRODUCTION_URL || 'https://aipany.mv3.cn' }}
+        run: |
+          set -euo pipefail
+          remote_script="${DEPLOY_PATH}/.deploy/incoming/${RELEASE_SHA}/scripts/deploy-ssh-release.sh"
+          ssh aipany-production \
+            "bash '${remote_script}' '${DEPLOY_PATH}' '${RELEASE_SHA}'"
+
+          curl --fail --silent --show-error \
+            --retry 12 --retry-delay 5 --retry-all-errors \
+            "${PRODUCTION_URL%/}/health" >/dev/null
+
+      - name: Print release identity
+        if: always()
+        shell: bash
+        env:
+          DEPLOY_PATH: ${{ vars.AIPANY_DEPLOY_PATH || '/opt/aipany' }}
+        run: |
+          ssh aipany-production \
+            "printf 'Current release: '; cat '${DEPLOY_PATH}/.deploy/current_sha' 2>/dev/null || printf 'unknown\n'; tail -n 10 '${DEPLOY_PATH}/.deploy/history.log' 2>/dev/null || true" \
+            || true
