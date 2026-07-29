@@ -13,6 +13,8 @@ jobs:
         with:
           node-version: 22
       - run: python3 -m compileall -q services/speaker-intelligence/app
+      - name: Validate shell scripts
+        run: bash -n scripts/*.sh
       - run: npm install
 
       - name: TypeScript typecheck
