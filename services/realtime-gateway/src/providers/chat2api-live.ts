@@ -25,6 +25,8 @@ interface Chat2ApiLiveEvents {
   close: [code: number, reason: string];
 }
 
+const LIVE_INPUT_FRAME_BYTES = 1280; // 40 ms PCM16 mono @ 16 kHz
+
 /**
  * Native speech-to-speech bridge backed by the user's chat2api browser service.
  * Aipany sends binary PCM16/16 kHz and receives binary PCM16/24 kHz while the
@@ -37,6 +39,7 @@ export class Chat2ApiLiveClient extends EventEmitter<Chat2ApiLiveEvents> {
   private closed = false;
   private currentResponseId?: string;
   private readonly responseText = new Map<string, string>();
+  private inputBuffer = Buffer.alloc(0);
 
   constructor(private readonly config: Chat2ApiLiveConfig) {
     super();
@@ -168,6 +171,7 @@ export class Chat2ApiLiveClient extends EventEmitter<Chat2ApiLiveEvents> {
       ws.on("close", (code, reason) => {
         this.ready = false;
         this.ws = undefined;
+        this.inputBuffer = Buffer.alloc(0);
         if (!settled) {
           settled = true;
           reject(new Error(`Chat2API GPT-Live 在初始化前关闭：${code} ${reason.toString()}`.trim()));
@@ -179,12 +183,19 @@ export class Chat2ApiLiveClient extends EventEmitter<Chat2ApiLiveEvents> {
   }
 
   appendAudio(audio: Buffer): void {
-    if (!this.ready || this.closed || !this.ws || this.ws.readyState !== WebSocket.OPEN || audio.length === 0) return;
-    this.ws.send(audio, { binary: true });
+    if (!this.ready || this.closed || audio.length === 0) return;
+    this.inputBuffer = this.inputBuffer.length ? Buffer.concat([this.inputBuffer, audio]) : Buffer.from(audio);
+    while (this.inputBuffer.length >= LIVE_INPUT_FRAME_BYTES) {
+      const frame = this.inputBuffer.subarray(0, LIVE_INPUT_FRAME_BYTES);
+      this.inputBuffer = this.inputBuffer.subarray(LIVE_INPUT_FRAME_BYTES);
+      this.sendBinary(frame);
+    }
   }
 
   commitTurn(): void {
-    // GPT-Live uses the ChatGPT Voice session's own turn detection.
+    // GPT-Live uses the ChatGPT Voice session's own turn detection. Flush only a
+    // partial local frame so an explicit client endpoint hint never strands PCM.
+    this.flushInput();
   }
 
   requestTextResponse(_text: string): boolean {
@@ -202,11 +213,26 @@ export class Chat2ApiLiveClient extends EventEmitter<Chat2ApiLiveEvents> {
 
   close(): void {
     if (this.closed) return;
+    this.flushInput();
     this.closed = true;
     this.ready = false;
     this.send({ type: "session.finish" });
     this.ws?.close(1000, "session finished");
     this.ws = undefined;
+    this.inputBuffer = Buffer.alloc(0);
+  }
+
+  private flushInput(): void {
+    if (!this.inputBuffer.length) return;
+    const frame = this.inputBuffer;
+    this.inputBuffer = Buffer.alloc(0);
+    this.sendBinary(frame);
+  }
+
+  private sendBinary(audio: Buffer): boolean {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
+    this.ws.send(audio, { binary: true });
+    return true;
   }
 
   private send(payload: Record<string, unknown>): boolean {
