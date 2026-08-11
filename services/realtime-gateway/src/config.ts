@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { loadChat2ApiLiveConfig } from "./providers/chat2api-live-config.js";
 
 const booleanString = z.enum(["true", "false"]).transform((value) => value === "true");
 const optionalString = z.preprocess((value) => value === "" ? undefined : value, z.string().optional());
@@ -113,6 +114,9 @@ export function loadConfig() {
   const workspaceBase = env.DASHSCOPE_WORKSPACE_ID
     ? `wss://${env.DASHSCOPE_WORKSPACE_ID}.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime`
     : "wss://dashscope.aliyuncs.com/api-ws/v1/realtime";
+  const chat2apiLive = loadChat2ApiLiveConfig();
+  const chat2apiNativeAvailable = chat2apiLive.enabled && Boolean(chat2apiLive.apiKey);
+  const qwenNativeApiKey = env.QWEN_OMNI_API_KEY || env.DASHSCOPE_API_KEY;
 
   return {
     server: {
@@ -152,8 +156,12 @@ export function loadConfig() {
       optimizeInstructions: env.QWEN_TTS_OPTIMIZE_INSTRUCTIONS,
     },
     qwenOmniRealtime: {
-      enabled: env.QWEN_OMNI_REALTIME_ENABLED,
-      apiKey: env.QWEN_OMNI_API_KEY || env.DASHSCOPE_API_KEY,
+      // server.ts historically has one native-engine availability gate. Keep it
+      // true when either native provider is available, while qwenEnabled records
+      // whether Alibaba Native Live itself is actually configured.
+      enabled: env.QWEN_OMNI_REALTIME_ENABLED || chat2apiNativeAvailable,
+      qwenEnabled: env.QWEN_OMNI_REALTIME_ENABLED,
+      apiKey: qwenNativeApiKey || (chat2apiNativeAvailable ? "__chat2api_live__" : ""),
       workspaceId: env.DASHSCOPE_WORKSPACE_ID,
       baseUrl: env.QWEN_OMNI_REALTIME_BASE_URL ?? workspaceBase,
       model: env.QWEN_OMNI_REALTIME_MODEL,
@@ -162,6 +170,7 @@ export function loadConfig() {
       vadThreshold: env.QWEN_OMNI_REALTIME_VAD_THRESHOLD,
       silenceMs: env.QWEN_OMNI_REALTIME_SILENCE_MS,
     },
+    chat2apiLive,
     llm: {
       baseUrl: env.LLM_BASE_URL.replace(/\/$/, ""),
       apiKey: env.LLM_API_KEY,
