@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import WebSocket from "ws";
-import { isQwenAudioRealtimeModel } from "../mobile/realtime-experience.js";
+import { loadChat2ApiLiveConfig } from "./chat2api-live-config.js";
+import { Chat2ApiLiveClient } from "./chat2api-live.js";
+import { isChat2ApiRealtimeModel, isQwenAudioRealtimeModel } from "../mobile/realtime-experience.js";
 
 export interface QwenOmniRealtimeConfig {
   apiKey: string;
@@ -32,14 +34,16 @@ interface QwenOmniRealtimeEvents {
 }
 
 /**
- * Server-side bridge for Alibaba Cloud realtime speech-to-speech models.
+ * Native realtime provider facade.
  *
- * The original implementation targeted Qwen3.5-Omni-Realtime. Qwen-Audio
- * 3.0 Realtime uses the same event-driven WebSocket family, with model-specific
- * session fields and smart_turn semantics handled here.
+ * Qwen models use Alibaba Cloud directly. The `gpt-live` model ids intentionally
+ * reuse the same Aipany provider contract but delegate to the user's chat2api
+ * browser bridge, keeping QwenOmniLiveSession and all mobile protocol events
+ * unchanged.
  */
 export class QwenOmniRealtimeClient extends EventEmitter<QwenOmniRealtimeEvents> {
   private ws?: WebSocket;
+  private chat2api?: Chat2ApiLiveClient;
   private ready = false;
   private closed = false;
   private responding = false;
@@ -54,6 +58,10 @@ export class QwenOmniRealtimeClient extends EventEmitter<QwenOmniRealtimeEvents>
 
   connect(): Promise<void> {
     if (this.connectPromise) return this.connectPromise;
+    if (isChat2ApiRealtimeModel(this.config.model)) {
+      this.connectPromise = this.connectChat2Api();
+      return this.connectPromise;
+    }
     this.connectPromise = new Promise<void>((resolve, reject) => {
       const url = new URL(this.config.baseUrl);
       url.searchParams.set("model", this.config.model);
@@ -90,8 +98,6 @@ export class QwenOmniRealtimeClient extends EventEmitter<QwenOmniRealtimeEvents>
               instructions: this.config.instructions,
               turn_detection: this.buildTurnDetection(),
             };
-            // Qwen-Audio Realtime emits input transcripts natively. Qwen3.5
-            // Omni keeps the explicit helper transcription model for subtitles.
             if (!isQwenAudioRealtimeModel(this.config.model)) {
               session.input_audio_transcription = { model: "qwen3-asr-flash-realtime" };
             }
@@ -206,9 +212,12 @@ export class QwenOmniRealtimeClient extends EventEmitter<QwenOmniRealtimeEvents>
   }
 
   appendAudio(audio: Buffer): void {
+    if (this.chat2api) {
+      this.chat2api.appendAudio(audio);
+      return;
+    }
     if (this.closed || audio.length === 0) return;
     this.audioBuffer = this.audioBuffer.length ? Buffer.concat([this.audioBuffer, audio]) : Buffer.from(audio);
-    // 16 kHz / PCM16 / mono: 1280 bytes = 40 ms.
     while (this.audioBuffer.length >= 1280) {
       const chunk = this.audioBuffer.subarray(0, 1280);
       this.audioBuffer = this.audioBuffer.subarray(1280);
@@ -217,12 +226,17 @@ export class QwenOmniRealtimeClient extends EventEmitter<QwenOmniRealtimeEvents>
   }
 
   commitTurn(): void {
+    if (this.chat2api) {
+      this.chat2api.commitTurn();
+      return;
+    }
     this.flushAudio();
     this.send({ event_id: randomUUID(), type: "input_audio_buffer.commit" });
     this.send({ event_id: randomUUID(), type: "response.create" });
   }
 
   requestTextResponse(text: string): boolean {
+    if (this.chat2api) return this.chat2api.requestTextResponse(text);
     if (!this.ready || !text.trim()) return false;
     const created = this.send({
       event_id: randomUUID(),
@@ -242,6 +256,10 @@ export class QwenOmniRealtimeClient extends EventEmitter<QwenOmniRealtimeEvents>
   }
 
   cancelResponse(): void {
+    if (this.chat2api) {
+      this.chat2api.cancelResponse();
+      return;
+    }
     if (!this.responding) return;
     const responseId = this.currentResponseId;
     this.send({ event_id: randomUUID(), type: "response.cancel" });
@@ -249,6 +267,10 @@ export class QwenOmniRealtimeClient extends EventEmitter<QwenOmniRealtimeEvents>
   }
 
   updateInstructions(instructions: string): void {
+    if (this.chat2api) {
+      this.chat2api.updateInstructions(instructions);
+      return;
+    }
     if (!this.ready) return;
     this.send({
       event_id: randomUUID(),
@@ -260,10 +282,68 @@ export class QwenOmniRealtimeClient extends EventEmitter<QwenOmniRealtimeEvents>
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    if (this.chat2api) {
+      this.chat2api.close();
+      this.chat2api = undefined;
+      this.ready = false;
+      return;
+    }
     this.flushAudio();
     this.ws?.close(1000, "aipany session closed");
     this.ws = undefined;
     this.ready = false;
+  }
+
+  private async connectChat2Api(): Promise<void> {
+    const live = loadChat2ApiLiveConfig();
+    if (!live.enabled || !live.apiKey) throw new Error("Chat2API GPT-Live 未启用或缺少 API Key");
+    const client = new Chat2ApiLiveClient({
+      apiKey: live.apiKey,
+      baseUrl: live.baseUrl,
+      model: this.config.model,
+      clientId: live.clientId,
+      instructions: this.config.instructions,
+    });
+    this.chat2api = client;
+    client.on("ready", () => {
+      this.ready = true;
+      this.emit("ready");
+    });
+    client.on("speechStarted", () => this.emit("speechStarted"));
+    client.on("speechStopped", () => this.emit("speechStopped"));
+    client.on("transcriptDelta", (text) => this.emit("transcriptDelta", text));
+    client.on("transcriptFinal", (text) => this.emit("transcriptFinal", text));
+    client.on("responseCreated", (responseId) => {
+      this.responding = true;
+      this.currentResponseId = responseId;
+      this.responseText.set(responseId, "");
+      this.emit("responseCreated", responseId);
+    });
+    client.on("textDelta", (responseId, delta) => {
+      this.responseText.set(responseId, `${this.responseText.get(responseId) ?? ""}${delta}`);
+      this.emit("textDelta", responseId, delta);
+    });
+    client.on("audio", (responseId, audio) => this.emit("audio", responseId, audio));
+    client.on("audioDone", (responseId) => this.emit("audioDone", responseId));
+    client.on("interrupted", (responseId, reason) => {
+      this.responding = false;
+      if (this.currentResponseId === responseId) this.currentResponseId = undefined;
+      this.responseText.delete(responseId);
+      this.emit("interrupted", responseId, reason);
+    });
+    client.on("responseDone", (responseId, text, status) => {
+      this.responding = false;
+      if (this.currentResponseId === responseId) this.currentResponseId = undefined;
+      const finalText = text || this.responseText.get(responseId) || "";
+      this.responseText.delete(responseId);
+      this.emit("responseDone", responseId, finalText, status);
+    });
+    client.on("error", (error) => this.emit("error", error));
+    client.on("close", (code, reason) => {
+      this.ready = false;
+      if (!this.closed) this.emit("close", code, reason);
+    });
+    await client.connect();
   }
 
   private flushAudio(): void {

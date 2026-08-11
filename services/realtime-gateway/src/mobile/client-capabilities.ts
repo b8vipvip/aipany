@@ -1,6 +1,7 @@
 import type { AppConfig } from "../config.js";
 import {
   getRealtimeExperienceDefinitions,
+  isChat2ApiRealtimeModel,
   isQwen35OmniRealtimeModel,
   isQwenAudioRealtimeModel,
   QWEN_AUDIO_REALTIME_FLASH,
@@ -17,7 +18,7 @@ export interface ClientVoiceOption {
 }
 
 export interface ClientExperienceModeOption {
-  id: "economy_live" | "native_flash" | "native_plus";
+  id: "economy_live" | "native_flash" | "native_plus" | "chat2api_live";
   title: string;
   subtitle: string;
   engine: "cascaded" | "omni_realtime";
@@ -29,8 +30,18 @@ export interface ClientExperienceModeOption {
 export interface ClientNativeModelOption {
   id: string;
   name: string;
-  family: "qwen_audio" | "qwen35_omni";
+  family: "qwen_audio" | "qwen35_omni" | "chat2api";
 }
+
+const CHAT2API_LIVE_VOICES: ClientVoiceOption[] = [
+  {
+    id: "chatgpt-current",
+    name: "ChatGPT 当前语音",
+    gender: "neutral",
+    description: "由已绑定 ChatGPT Voice 标签页当前选择的声音决定",
+    previewable: false,
+  },
+];
 
 const QWEN_AUDIO_REALTIME_VOICES: ClientVoiceOption[] = [
   { id: "longanqian", name: "龙安千", gender: "neutral", description: "Qwen-Audio Realtime 默认系统音色", previewable: true },
@@ -122,6 +133,7 @@ const QWEN3_INSTRUCT_REALTIME_VOICES: ClientVoiceOption[] = [
 
 export function getClientVoiceOptions(model: string, configuredVoice: string): ClientVoiceOption[] {
   const normalized = model.trim().toLowerCase();
+  if (isChat2ApiRealtimeModel(model)) return CHAT2API_LIVE_VOICES.map(cloneVoice);
   if (normalized === "qwen-audio-3.0-tts-plus") return ensureConfiguredVoice(QWEN_AUDIO_TTS_PLUS_VOICES, configuredVoice);
   if (normalized === "qwen-audio-3.0-tts-flash") return ensureConfiguredVoice(QWEN_AUDIO_TTS_FLASH_VOICES, configuredVoice);
   if (isQwenAudioRealtimeModel(model)) return QWEN_AUDIO_REALTIME_VOICES.map(cloneVoice);
@@ -154,7 +166,7 @@ export function getClientNativeModelOptions(): ClientNativeModelOption[] {
   return SUPPORTED_NATIVE_REALTIME_MODELS.map((id) => ({
     id,
     name: id,
-    family: isQwenAudioRealtimeModel(id) ? "qwen_audio" : "qwen35_omni",
+    family: isChat2ApiRealtimeModel(id) ? "chat2api" : isQwenAudioRealtimeModel(id) ? "qwen_audio" : "qwen35_omni",
   }));
 }
 
@@ -170,6 +182,7 @@ export function resolveRequestedVoice(model: string, configuredVoice: string, re
 
 export function defaultVoiceForModel(model: string): string {
   const normalized = model.trim().toLowerCase();
+  if (isChat2ApiRealtimeModel(model)) return "chatgpt-current";
   if (normalized === "qwen-audio-3.0-tts-plus") return "longanlingxin";
   if (normalized === "qwen-audio-3.0-tts-flash") return "longanhuan_v3.6";
   if (model === QWEN_AUDIO_REALTIME_PLUS || model === QWEN_AUDIO_REALTIME_FLASH) return "longanqian";

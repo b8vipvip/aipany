@@ -3,7 +3,7 @@ import { z } from "zod";
 export const interactionModeSchema = z.enum(["auto", "owner_focus", "group"]);
 export type InteractionMode = z.infer<typeof interactionModeSchema>;
 
-export const experienceModeSchema = z.enum(["economy_live", "native_flash", "native_plus"]);
+export const experienceModeSchema = z.enum(["economy_live", "native_flash", "native_plus", "chat2api_live"]);
 export type ExperienceMode = z.infer<typeof experienceModeSchema>;
 
 export const inputAudioSchema = z.object({

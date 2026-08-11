@@ -25,33 +25,36 @@ const QWEN_AUDIO_VOICES = [
   "longanlufeng",
 ];
 
-test("three realtime experience modes are exposed without subscription semantics", () => {
+test("realtime experience modes include ChatGPT Live without subscription semantics", () => {
   const config = loadConfig();
   const modes = getClientExperienceModeOptions(config);
 
-  assert.deepEqual(modes.map((item) => item.id), ["economy_live", "native_flash", "native_plus"]);
-  assert.equal(modes[0]?.engine, "cascaded");
-  assert.equal(modes[1]?.model, QWEN_AUDIO_REALTIME_FLASH);
-  assert.equal(modes[2]?.model, QWEN_AUDIO_REALTIME_PLUS);
+  assert.deepEqual(modes.map((item) => item.id), ["economy_live", "chat2api_live", "native_flash", "native_plus"]);
+  assert.equal(modes.find((item) => item.id === "economy_live")?.engine, "cascaded");
+  assert.equal(modes.find((item) => item.id === "chat2api_live")?.model, "gpt-live");
+  assert.equal(modes.find((item) => item.id === "native_flash")?.model, QWEN_AUDIO_REALTIME_FLASH);
+  assert.equal(modes.find((item) => item.id === "native_plus")?.model, QWEN_AUDIO_REALTIME_PLUS);
   assert.equal(resolveExperienceDefinition(config, "native_plus")?.recommendedTurnDetection, "smart_turn");
 });
 
-test("disabled Native Live is clearly labelled while voice preview remains discoverable", () => {
+test("disabled Qwen Native Live is clearly labelled while voice preview remains discoverable", () => {
   const current = loadConfig();
   const config = {
     ...current,
     qwenOmniRealtime: {
       ...current.qwenOmniRealtime,
       enabled: false,
+      qwenEnabled: false,
       apiKey: "configured-for-preview",
     },
   };
   const modes = getRealtimeExperienceDefinitions(config);
+  const flash = modes.find((item) => item.id === "native_flash");
 
   assert.equal(isNativeExperienceAvailable(config), false);
-  assert.match(modes[1]?.title ?? "", /未启用/u);
-  assert.match(modes[1]?.subtitle ?? "", /音色仍可试听/u);
-  assert.match(modes[1]?.subtitle ?? "", /回退到 Economy Live/u);
+  assert.match(flash?.title ?? "", /未启用/u);
+  assert.match(flash?.subtitle ?? "", /音色仍可试听/u);
+  assert.match(flash?.subtitle ?? "", /回退到 Economy Live/u);
 });
 
 test("Qwen Audio realtime modes expose every system voice and safe defaults", () => {
@@ -65,6 +68,13 @@ test("Qwen Audio realtime modes expose every system voice and safe defaults", ()
   }
 });
 
+test("ChatGPT Live uses the browser-selected ChatGPT voice and is not previewed as Qwen", () => {
+  const voices = getClientVoiceOptions("gpt-live", "chatgpt-current");
+  assert.deepEqual(voices.map((voice) => voice.id), ["chatgpt-current"]);
+  assert.equal(voices[0]?.previewable, false);
+  assert.equal(defaultVoiceForModel("gpt-live"), "chatgpt-current");
+});
+
 test("legacy Qwen3.5 Omni realtime voice catalog remains available", () => {
   const voices = getClientVoiceOptions("qwen3.5-omni-plus-realtime", "Tina");
   assert.ok(voices.length >= 50);
@@ -73,7 +83,7 @@ test("legacy Qwen3.5 Omni realtime voice catalog remains available", () => {
   assert.equal(voices.every((voice) => voice.previewable === true), true);
 });
 
-test("native model dropdown includes qwen audio and qwen3.5 realtime families", () => {
+test("Qwen native model dropdown stays provider-specific", () => {
   assert.deepEqual(getClientNativeModelOptions().map((item) => item.id), [
     "qwen-audio-3.0-realtime-plus",
     "qwen-audio-3.0-realtime-flash",
