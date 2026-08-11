@@ -35,6 +35,7 @@ test("Chat2API live URL upgrades http and keeps optional extension client", () =
 
 test("ChatGPT Live is exposed without falsely enabling Qwen Native modes", async () => {
   await withEnvironment({
+    AIPANY_REALTIME_ENGINE: "auto",
     CHAT2API_LIVE_ENABLED: "true",
     CHAT2API_LIVE_API_KEY: "test-live-key",
     CHAT2API_LIVE_BASE_URL: "https://chat2api.example.test",
@@ -45,8 +46,9 @@ test("ChatGPT Live is exposed without falsely enabling Qwen Native modes", async
     SPEAKER_IDENTITY_STORE: "memory",
   }, () => {
     const config = loadConfig();
-    assert.equal(config.qwenOmniRealtime.enabled, true, "legacy native engine gate should see a native provider");
+    assert.equal(config.qwenOmniRealtime.enabled, true, "explicit ChatGPT Live should pass the native-session gate");
     assert.equal(config.qwenOmniRealtime.qwenEnabled, false);
+    assert.equal(config.server.realtimeEngine, "cascaded", "legacy auto sessions must not be redirected to an unconfigured Qwen provider");
     const modes = getRealtimeExperienceDefinitions(config);
     const chatgpt = modes.find((item) => item.id === "chat2api_live");
     const qwen = modes.find((item) => item.id === "native_plus");

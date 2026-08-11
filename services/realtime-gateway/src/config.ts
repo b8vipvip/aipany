@@ -117,6 +117,11 @@ export function loadConfig() {
   const chat2apiLive = loadChat2ApiLiveConfig();
   const chat2apiNativeAvailable = chat2apiLive.enabled && Boolean(chat2apiLive.apiKey);
   const qwenNativeApiKey = env.QWEN_OMNI_API_KEY || env.DASHSCOPE_API_KEY;
+  const realtimeEngine = env.AIPANY_REALTIME_ENGINE === "auto"
+    && chat2apiNativeAvailable
+    && !env.QWEN_OMNI_REALTIME_ENABLED
+    ? "cascaded"
+    : env.AIPANY_REALTIME_ENGINE;
 
   return {
     server: {
@@ -135,7 +140,10 @@ export function loadConfig() {
         ttlSeconds: env.AIPANY_MOBILE_PREVIEW_TOKEN_TTL_SECONDS,
         tenantId: env.AIPANY_MOBILE_PREVIEW_TENANT,
       },
-      realtimeEngine: env.AIPANY_REALTIME_ENGINE,
+      // Chat2API is selected by the explicit chat2api_live experience mode. Do
+      // not let merely enabling that provider change legacy clients that omit an
+      // experienceMode; they keep the historical auto => Qwen-or-cascaded path.
+      realtimeEngine,
     },
     observability: {
       filePath: env.AIPANY_OBSERVABILITY_PATH,
