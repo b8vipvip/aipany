@@ -8,13 +8,13 @@ export const QWEN_AUDIO_REALTIME_FLASH = "qwen-audio-3.0-realtime-flash";
 export const CHAT2API_GPT_LIVE = "gpt-live";
 export const CHAT2API_GPT_LIVE_MINI = "gpt-live-mini";
 
+// This list backs the existing Qwen Native model selector. ChatGPT Live is a
+// separate provider/mode and must not appear as if it were a DashScope model.
 export const SUPPORTED_NATIVE_REALTIME_MODELS = [
   QWEN_AUDIO_REALTIME_PLUS,
   QWEN_AUDIO_REALTIME_FLASH,
   "qwen3.5-omni-plus-realtime",
   "qwen3.5-omni-flash-realtime",
-  CHAT2API_GPT_LIVE,
-  CHAT2API_GPT_LIVE_MINI,
 ] as const;
 
 export interface RealtimeExperienceDefinition {
@@ -81,7 +81,18 @@ export function resolveExperienceDefinition(
 }
 
 export function isQwenNativeExperienceAvailable(config: AppConfig): boolean {
-  return config.qwenOmniRealtime.qwenEnabled && Boolean(config.qwenOmniRealtime.apiKey.trim()) && config.qwenOmniRealtime.apiKey !== "__chat2api_live__";
+  return config.qwenOmniRealtime.qwenEnabled
+    && Boolean(config.qwenOmniRealtime.apiKey.trim())
+    && config.qwenOmniRealtime.apiKey !== "__chat2api_live__";
+}
+
+export function isRealtimeExperienceAvailable(
+  config: AppConfig,
+  experience: RealtimeExperienceDefinition | undefined,
+): boolean {
+  if (!experience || experience.engine === "cascaded") return true;
+  if (experience.provider === "chat2api") return isChat2ApiLiveAvailable();
+  return isQwenNativeExperienceAvailable(config);
 }
 
 export function isNativeExperienceAvailable(config: AppConfig): boolean {
