@@ -11,6 +11,7 @@ import { assertSessionIdentity, requireScope, type AuthContext } from "../auth.j
 import type { AppConfig } from "../config.js";
 import { recordGlobalRealtimeEvent } from "../observability/global-observability.js";
 import type { SessionObservability } from "../observability/realtime-observability.js";
+import { loadChat2ApiLiveConfig } from "../providers/chat2api-live-config.js";
 import { Chat2ApiLiveClient } from "../providers/chat2api-live.js";
 
 /**
@@ -42,17 +43,18 @@ export class Chat2ApiLiveSession {
     if (this.started) throw new Error("会话已经启动");
     requireScope(this.authContext, "realtime");
     assertSessionIdentity(this.authContext, event.session);
-    if (!this.config.chat2apiLive.enabled) throw new Error("Chat2API GPT-Live 未启用");
-    if (!this.config.chat2apiLive.apiKey.trim()) throw new Error("Chat2API GPT-Live 缺少 API Key");
+    const liveConfig = loadChat2ApiLiveConfig();
+    if (!liveConfig.enabled) throw new Error("Chat2API GPT-Live 未启用");
+    if (!liveConfig.apiKey) throw new Error("Chat2API GPT-Live 缺少 API Key");
 
     this.started = true;
     this.mode = event.session.interactionMode;
     const instructions = event.session.systemPrompt?.trim() || this.config.conversation.defaultSystemPrompt;
     const provider = new Chat2ApiLiveClient({
-      apiKey: this.config.chat2apiLive.apiKey,
-      baseUrl: this.config.chat2apiLive.baseUrl,
-      model: this.config.chat2apiLive.model,
-      clientId: this.config.chat2apiLive.clientId,
+      apiKey: liveConfig.apiKey,
+      baseUrl: liveConfig.baseUrl,
+      model: liveConfig.model,
+      clientId: liveConfig.clientId,
       instructions,
     });
     this.provider = provider;
@@ -73,7 +75,7 @@ export class Chat2ApiLiveSession {
     this.send({ type: "speaker.consent.updated", granted: false });
     this.observe("chat2api_live.session.ready", {
       upstream: "chat2api",
-      model: this.config.chat2apiLive.model,
+      model: liveConfig.model,
     });
     this.send({ type: "session.ready", sessionId: this.id });
   }
