@@ -81,7 +81,7 @@ export function resolveExperienceDefinition(
 }
 
 export function isQwenNativeExperienceAvailable(config: AppConfig): boolean {
-  return config.qwenOmniRealtime.enabled && Boolean(config.qwenOmniRealtime.apiKey.trim());
+  return config.qwenOmniRealtime.qwenEnabled && Boolean(config.qwenOmniRealtime.apiKey.trim()) && config.qwenOmniRealtime.apiKey !== "__chat2api_live__";
 }
 
 export function isNativeExperienceAvailable(config: AppConfig): boolean {
