@@ -106,10 +106,11 @@ test("gpt-live model delegates the existing native client contract to Chat2API",
       const audioPromise = new Promise<Buffer>((resolve) => client.once("audio", (_id, audio) => resolve(audio)));
       const donePromise = new Promise<string>((resolve) => client.once("responseDone", (_id, text) => resolve(text)));
       await client.connect();
-      client.appendAudio(Buffer.from([9, 8, 7, 6]));
+      const microphoneFrame = Buffer.alloc(1280, 0x09);
+      client.appendAudio(microphoneFrame);
       assert.deepEqual(await audioPromise, Buffer.from([1, 2, 3, 4]));
       assert.equal(await donePromise, "你好");
-      assert.deepEqual(microphone, Buffer.from([9, 8, 7, 6]));
+      assert.deepEqual(microphone, microphoneFrame);
       assert.equal(authorization, "Bearer bridge-key");
       client.close();
     });
