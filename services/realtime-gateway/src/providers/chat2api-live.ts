@@ -1,6 +1,14 @@
 import { EventEmitter } from "node:events";
 import WebSocket from "ws";
 
+export type Chat2ApiLiveStatusState =
+  | "connecting"
+  | "bridge_connected"
+  | "ready"
+  | "degraded"
+  | "unavailable"
+  | "closed";
+
 export interface Chat2ApiLiveConfig {
   apiKey: string;
   baseUrl: string;
@@ -10,6 +18,7 @@ export interface Chat2ApiLiveConfig {
 }
 
 interface Chat2ApiLiveEvents {
+  status: [state: Chat2ApiLiveStatusState, detail?: string];
   ready: [];
   speechStarted: [];
   speechStopped: [];
@@ -52,6 +61,7 @@ export class Chat2ApiLiveClient extends EventEmitter<Chat2ApiLiveEvents> {
 
   connect(): Promise<void> {
     if (this.connectPromise) return this.connectPromise;
+    this.emit("status", "connecting", "正在连接 Chat2API GPT-Live bridge");
     this.connectPromise = new Promise<void>((resolve, reject) => {
       const url = buildLiveUrl(this.config.baseUrl, this.config.clientId);
       let settled = false;
@@ -72,6 +82,7 @@ export class Chat2ApiLiveClient extends EventEmitter<Chat2ApiLiveEvents> {
       };
 
       const failBeforeReady = (error: Error) => {
+        this.emit("status", "unavailable", error.message);
         if (!settled) {
           settled = true;
           clearStartupTimer();
@@ -93,6 +104,7 @@ export class Chat2ApiLiveClient extends EventEmitter<Chat2ApiLiveEvents> {
       startupTimer.unref();
 
       ws.on("open", () => {
+        this.emit("status", "bridge_connected", "Chat2API WebSocket 已连接，正在等待 ChatGPT Voice 会话就绪");
         this.send({
           type: "session.start",
           model: this.config.model,
@@ -117,6 +129,7 @@ export class Chat2ApiLiveClient extends EventEmitter<Chat2ApiLiveEvents> {
             this.lastPongAt = Date.now();
             clearStartupTimer();
             this.startHeartbeat();
+            this.emit("status", "ready", "ChatGPT Voice / GPT-Live 会话已就绪");
             if (!settled) {
               settled = true;
               resolve();
@@ -127,6 +140,7 @@ export class Chat2ApiLiveClient extends EventEmitter<Chat2ApiLiveEvents> {
           if (type === "session.closed") {
             this.ready = false;
             this.stopHeartbeat();
+            this.emit("status", "unavailable", "ChatGPT Voice 上游会话已关闭");
             if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
               ws.close(1012, "chat2api live upstream session closed");
             }
@@ -206,6 +220,7 @@ export class Chat2ApiLiveClient extends EventEmitter<Chat2ApiLiveEvents> {
                 ws.close(1011, "chat2api live startup error");
               }
             } else {
+              this.emit("status", "degraded", error.message);
               this.emit("error", error);
             }
             return;
@@ -213,7 +228,10 @@ export class Chat2ApiLiveClient extends EventEmitter<Chat2ApiLiveEvents> {
         } catch (error) {
           const normalized = error instanceof Error ? error : new Error(String(error));
           if (!this.ready && !settled) failBeforeReady(normalized);
-          else this.emit("error", normalized);
+          else {
+            this.emit("status", "degraded", normalized.message);
+            this.emit("error", normalized);
+          }
         }
       });
 
@@ -228,7 +246,10 @@ export class Chat2ApiLiveClient extends EventEmitter<Chat2ApiLiveEvents> {
           settled = true;
           reject(new Error(`Chat2API GPT-Live 在初始化前关闭：${code} ${reason.toString()}`.trim()));
         }
-        if (!this.closed) this.emit("close", code, reason.toString());
+        if (!this.closed) {
+          this.emit("status", code === 1000 ? "closed" : "unavailable", reason.toString() || `WebSocket closed (${code})`);
+          this.emit("close", code, reason.toString());
+        }
       });
     });
     return this.connectPromise;
@@ -269,6 +290,7 @@ export class Chat2ApiLiveClient extends EventEmitter<Chat2ApiLiveEvents> {
     this.closed = true;
     this.ready = false;
     this.stopHeartbeat();
+    this.emit("status", "closed", "Aipany 主动结束 GPT-Live 会话");
     this.send({ type: "session.finish" });
     this.ws?.close(1000, "session finished");
     this.ws = undefined;
@@ -283,6 +305,7 @@ export class Chat2ApiLiveClient extends EventEmitter<Chat2ApiLiveEvents> {
       if (this.closed || !this.ready || !ws || ws.readyState !== WebSocket.OPEN) return;
       if (Date.now() - this.lastPongAt > LIVE_HEARTBEAT_TIMEOUT_MS) {
         this.ready = false;
+        this.emit("status", "degraded", "Chat2API GPT-Live 心跳超时，准备自动恢复");
         ws.close(1012, "chat2api live heartbeat timeout");
         return;
       }
