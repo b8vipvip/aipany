@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import WebSocket from "ws";
 import { loadChat2ApiLiveConfig } from "./chat2api-live-config.js";
-import { Chat2ApiLiveClient } from "./chat2api-live.js";
+import { Chat2ApiLiveClient, type Chat2ApiLiveStatusState } from "./chat2api-live.js";
 import { isChat2ApiRealtimeModel, isQwenAudioRealtimeModel } from "../mobile/realtime-experience.js";
 
 export interface QwenOmniRealtimeConfig {
@@ -18,6 +18,7 @@ export interface QwenOmniRealtimeConfig {
 }
 
 interface QwenOmniRealtimeEvents {
+  upstreamStatus: [state: Chat2ApiLiveStatusState, detail?: string];
   ready: [];
   speechStarted: [];
   speechStopped: [];
@@ -305,6 +306,7 @@ export class QwenOmniRealtimeClient extends EventEmitter<QwenOmniRealtimeEvents>
       instructions: this.config.instructions,
     });
     this.chat2api = client;
+    client.on("status", (state, detail) => this.emit("upstreamStatus", state, detail));
     client.on("ready", () => {
       this.ready = true;
       this.emit("ready");
