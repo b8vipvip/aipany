@@ -58,6 +58,7 @@ class MainActivity : Activity() {
     private var hasResumedOnce = false
     private var pendingCrashUploaded = false
     private var initialExperienceResolved = true
+    private var upstreamStatusSummary: String? = null
     private var settings = AppSettings()
     private var lastAppliedSettings = AppSettings()
     private val assistantText = StringBuilder()
@@ -152,6 +153,7 @@ class MainActivity : Activity() {
         if (hasResumedOnce && latest != lastAppliedSettings) {
             settings = latest
             lastAppliedSettings = latest
+            if (!isChat2ApiLiveMode()) upstreamStatusSummary = null
             audioEngine.updatePreferences(settings)
             refreshSettingsSummary()
             transcriptCard.visibility = if (settings.showTranscript) View.VISIBLE else View.GONE
@@ -159,6 +161,7 @@ class MainActivity : Activity() {
         } else {
             settings = latest
             lastAppliedSettings = latest
+            if (!isChat2ApiLiveMode()) upstreamStatusSummary = null
         }
         hasResumedOnce = true
     }
@@ -377,6 +380,10 @@ class MainActivity : Activity() {
             return
         }
         connectionAttempt = true
+        if (isChat2ApiLiveMode()) {
+            upstreamStatusSummary = "GPT-Live · 正在连接"
+            refreshSettingsSummary()
+        }
         updateStatus(
             if (isChat2ApiLiveMode()) "正在连接 ChatGPT Live" else "正在连接小派",
             "自动获取安全会话",
@@ -413,8 +420,10 @@ class MainActivity : Activity() {
         responseWatchdogGeneration += 1
         sessionActive = false
         connectionAttempt = false
+        if (isChat2ApiLiveMode()) upstreamStatusSummary = "GPT-Live · 正在重连"
         realtimeClient.close()
         stopAudioAsync()
+        refreshSettingsSummary()
         handler.postDelayed({ connectAutomatically() }, 450)
     }
 
@@ -461,6 +470,24 @@ class MainActivity : Activity() {
 
     private fun handleServerEvent(event: JSONObject) {
         when (event.optString("type")) {
+            "upstream.status" -> {
+                if (event.optString("provider") != "chat2api_live") return
+                val state = event.optString("state")
+                val ui = chat2ApiUpstreamUiStatus(
+                    state = state,
+                    detail = event.optString("detail"),
+                    attempt = event.optInt("attempt", 0),
+                )
+                upstreamStatusSummary = ui.summary
+                refreshSettingsSummary()
+                if (state == "closed" && destroyed) return
+                val orbState = if (state == "ready" && sessionActive) {
+                    if (micPaused) VoiceOrbView.State.PAUSED else VoiceOrbView.State.LISTENING
+                } else {
+                    VoiceOrbView.State.CONNECTING
+                }
+                updateStatus(ui.title, ui.subtitle, orbState)
+            }
             "session.created" -> updateStatus(
                 "正在启动语音",
                 if (isChat2ApiLiveMode()) "正在建立 chat2api / ChatGPT Voice 原生实时会话" else "服务端实时语音会话准备中",
@@ -635,7 +662,8 @@ class MainActivity : Activity() {
             settings.experienceMode == "chat2api_live" -> "ChatGPT Live · chat2api · gpt-live"
             else -> settings.experienceMode
         }
-        settingsSummaryView.text = "$experienceLabel · ${voice?.name ?: settings.voiceId} · $interaction · ${settings.endpointProfile.title}断句"
+        val upstream = upstreamStatusSummary?.takeIf { isChat2ApiLiveMode() }?.let { " · $it" }.orEmpty()
+        settingsSummaryView.text = "$experienceLabel · ${voice?.name ?: settings.voiceId} · $interaction · ${settings.endpointProfile.title}断句$upstream"
         transcriptCard.visibility = if (settings.showTranscript) View.VISIBLE else View.GONE
     }
 
