@@ -11,6 +11,14 @@ data class LiveDiagnosticEvent(
     val model: String = "",
 )
 
+data class LiveLatencySnapshot(
+    val endpointToAsrMs: Long = -1L,
+    val asrToLlmMs: Long = -1L,
+    val llmToAudioMs: Long = -1L,
+    val totalFirstResponseMs: Long = -1L,
+    val updatedAtMs: Long = 0L,
+)
+
 data class LiveDiagnosticsSnapshot(
     val gatewayState: String,
     val upstreamState: String,
@@ -19,6 +27,11 @@ data class LiveDiagnosticsSnapshot(
     val recoveryAttempt: Int,
     val lastReadyAtMs: Long,
     val lastError: String,
+    val androidAudioState: String,
+    val androidAudioDetail: String,
+    val lastAudioReadyAtMs: Long,
+    val lastAudioError: String,
+    val latency: LiveLatencySnapshot,
     val updatedAtMs: Long,
     val events: List<LiveDiagnosticEvent>,
 )
@@ -34,6 +47,11 @@ object LiveDiagnosticsStore {
     private var recoveryAttempt = 0
     private var lastReadyAtMs = 0L
     private var lastError = ""
+    private var androidAudioState = "unknown"
+    private var androidAudioDetail = ""
+    private var lastAudioReadyAtMs = 0L
+    private var lastAudioError = ""
+    private var latency = LiveLatencySnapshot()
     private var updatedAtMs = 0L
 
     fun recordGateway(message: String, nowMs: Long = System.currentTimeMillis()) {
@@ -50,7 +68,9 @@ object LiveDiagnosticsStore {
                     detail = clean,
                 ),
             )
-            if (clean.startsWith("连接失败") || clean == "连接已断开") lastError = clean
+            if (clean.startsWith("连接失败") || clean == "连接已断开" || clean.startsWith("Bootstrap 失败")) {
+                lastError = clean
+            }
         }
     }
 
@@ -100,6 +120,54 @@ object LiveDiagnosticsStore {
         )
     }
 
+    fun recordAndroidAudio(
+        state: String,
+        detail: String = "",
+        nowMs: Long = System.currentTimeMillis(),
+    ) {
+        val cleanState = state.trim().ifBlank { "unknown" }.take(64)
+        val cleanDetail = detail.trim().take(240)
+        synchronized(lock) {
+            androidAudioState = cleanState
+            androidAudioDetail = cleanDetail
+            if (cleanState == "audio_ready") {
+                lastAudioReadyAtMs = nowMs
+                lastAudioError = ""
+            } else if (cleanState == "audio_timeout" || cleanState == "audio_failed") {
+                lastAudioError = cleanDetail.ifBlank { cleanState }
+            }
+            updatedAtMs = nowMs
+            appendLocked(
+                LiveDiagnosticEvent(
+                    timestampMs = nowMs,
+                    source = "android_audio",
+                    state = cleanState,
+                    detail = cleanDetail,
+                    model = model,
+                ),
+            )
+        }
+    }
+
+    fun recordLatency(
+        endpointToAsrMs: Long,
+        asrToLlmMs: Long,
+        llmToAudioMs: Long,
+        totalFirstResponseMs: Long,
+        nowMs: Long = System.currentTimeMillis(),
+    ) {
+        synchronized(lock) {
+            latency = LiveLatencySnapshot(
+                endpointToAsrMs = endpointToAsrMs,
+                asrToLlmMs = asrToLlmMs,
+                llmToAudioMs = llmToAudioMs,
+                totalFirstResponseMs = totalFirstResponseMs,
+                updatedAtMs = nowMs,
+            )
+            updatedAtMs = nowMs
+        }
+    }
+
     fun snapshot(): LiveDiagnosticsSnapshot = synchronized(lock) {
         LiveDiagnosticsSnapshot(
             gatewayState = gatewayState,
@@ -109,6 +177,11 @@ object LiveDiagnosticsStore {
             recoveryAttempt = recoveryAttempt,
             lastReadyAtMs = lastReadyAtMs,
             lastError = lastError,
+            androidAudioState = androidAudioState,
+            androidAudioDetail = androidAudioDetail,
+            lastAudioReadyAtMs = lastAudioReadyAtMs,
+            lastAudioError = lastAudioError,
+            latency = latency,
             updatedAtMs = updatedAtMs,
             events = events.toList(),
         )
@@ -123,6 +196,11 @@ object LiveDiagnosticsStore {
         recoveryAttempt = 0
         lastReadyAtMs = 0L
         lastError = ""
+        androidAudioState = "unknown"
+        androidAudioDetail = ""
+        lastAudioReadyAtMs = 0L
+        lastAudioError = ""
+        latency = LiveLatencySnapshot()
         updatedAtMs = 0L
     }
 
@@ -138,7 +216,7 @@ object LiveDiagnosticsStore {
     }
 
     private fun classifyGateway(message: String): String = when {
-        message.startsWith("连接失败") -> "failed"
+        message.startsWith("连接失败") || message.startsWith("Bootstrap 失败") -> "failed"
         message == "连接已断开" -> "closed"
         message.contains("安全连接") -> "connected"
         message.contains("自动重连") -> "reconnecting"
