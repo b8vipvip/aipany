@@ -11,6 +11,7 @@ fun chat2ApiUpstreamUiStatus(
     detail: String = "",
     attempt: Int = 0,
 ): Chat2ApiUpstreamUiStatus {
+    LiveDiagnosticsStore.recordUpstream(state = state, detail = detail, attempt = attempt)
     val cleanDetail = detail.trim()
     return when (state) {
         "connecting" -> Chat2ApiUpstreamUiStatus(
