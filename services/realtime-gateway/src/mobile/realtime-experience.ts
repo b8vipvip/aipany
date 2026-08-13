@@ -47,7 +47,7 @@ export function getRealtimeExperienceDefinitions(config: AppConfig): RealtimeExp
       subtitle: chat2apiAvailable
         ? "经 chat2api 直连 ChatGPT Voice · 音频原生实时对话"
         : chat2apiDisabledSubtitle,
-      engine: "omni_realtime",
+      engine: chat2apiAvailable ? "omni_realtime" : "cascaded",
       provider: "chat2api",
       model: chat2apiConfig.model,
     },
@@ -55,7 +55,7 @@ export function getRealtimeExperienceDefinitions(config: AppConfig): RealtimeExp
       id: "native_flash",
       title: qwenNativeAvailable ? "Native Flash" : "Native Flash · 未启用",
       subtitle: qwenNativeAvailable ? "端到端实时语音 · 更低成本、更快响应" : nativeDisabledSubtitle,
-      engine: "omni_realtime",
+      engine: qwenNativeAvailable ? "omni_realtime" : "cascaded",
       provider: "qwen",
       model: QWEN_AUDIO_REALTIME_FLASH,
       recommendedTurnDetection: "smart_turn",
@@ -64,7 +64,7 @@ export function getRealtimeExperienceDefinitions(config: AppConfig): RealtimeExp
       id: "native_plus",
       title: qwenNativeAvailable ? "Native Plus" : "Native Plus · 未启用",
       subtitle: qwenNativeAvailable ? "端到端实时语音 · 更强理解与自然表达" : nativeDisabledSubtitle,
-      engine: "omni_realtime",
+      engine: qwenNativeAvailable ? "omni_realtime" : "cascaded",
       provider: "qwen",
       model: QWEN_AUDIO_REALTIME_PLUS,
       recommendedTurnDetection: "smart_turn",
