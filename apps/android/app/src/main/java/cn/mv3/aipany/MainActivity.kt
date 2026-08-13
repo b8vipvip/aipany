@@ -57,6 +57,8 @@ class MainActivity : Activity() {
     private var micPaused = false
     private var hasResumedOnce = false
     private var pendingCrashUploaded = false
+    private var initialExperienceResolved = true
+    private var upstreamStatusSummary: String? = null
     private var settings = AppSettings()
     private var lastAppliedSettings = AppSettings()
     private val assistantText = StringBuilder()
@@ -70,6 +72,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        initialExperienceResolved = AppSettings.hasPersistedExperienceMode(this)
         settings = AppSettings.load(this)
         lastAppliedSettings = settings
         buildUi()
@@ -113,7 +116,13 @@ class MainActivity : Activity() {
                 waitingForFirstAudio = false
                 val committed = realtimeClient.commitAudio()
                 runOnUiThread {
-                    if (committed) {
+                    if (isNativeExperienceMode()) {
+                        updateStatus(
+                            "正在理解",
+                            if (isChat2ApiLiveMode()) "GPT-Live 正在判断本轮表达是否结束" else "Native Live 正在判断本轮表达是否结束",
+                            VoiceOrbView.State.THINKING,
+                        )
+                    } else if (committed) {
                         updateStatus("正在理解", "本地智能断句已提交", VoiceOrbView.State.THINKING)
                     } else {
                         updateStatus("我在听", "已合并连续语音，继续等待完整表达", VoiceOrbView.State.LISTENING)
@@ -144,6 +153,7 @@ class MainActivity : Activity() {
         if (hasResumedOnce && latest != lastAppliedSettings) {
             settings = latest
             lastAppliedSettings = latest
+            if (!isChat2ApiLiveMode()) upstreamStatusSummary = null
             audioEngine.updatePreferences(settings)
             refreshSettingsSummary()
             transcriptCard.visibility = if (settings.showTranscript) View.VISIBLE else View.GONE
@@ -151,6 +161,7 @@ class MainActivity : Activity() {
         } else {
             settings = latest
             lastAppliedSettings = latest
+            if (!isChat2ApiLiveMode()) upstreamStatusSummary = null
         }
         hasResumedOnce = true
     }
@@ -206,6 +217,15 @@ class MainActivity : Activity() {
             })
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         header.addView(Button(this).apply {
+            text = "诊断"
+            textSize = 13f
+            background = rounded(Color.WHITE, dp(14).toFloat(), Color.rgb(226, 229, 238))
+            setOnClickListener {
+                runCatching { startActivity(Intent(this@MainActivity, LiveDiagnosticsActivity::class.java)) }
+                    .onFailure { Toast.makeText(this@MainActivity, "诊断页打开失败：${it.javaClass.simpleName}", Toast.LENGTH_LONG).show() }
+            }
+        }, LinearLayout.LayoutParams(dp(72), dp(46)).apply { marginEnd = dp(6) })
+        header.addView(Button(this).apply {
             text = "设置"
             textSize = 14f
             background = rounded(Color.WHITE, dp(14).toFloat(), Color.rgb(226, 229, 238))
@@ -213,7 +233,7 @@ class MainActivity : Activity() {
                 runCatching { startActivity(Intent(this@MainActivity, SettingsActivity::class.java)) }
                     .onFailure { Toast.makeText(this@MainActivity, "设置页打开失败：${it.javaClass.simpleName}", Toast.LENGTH_LONG).show() }
             }
-        }, LinearLayout.LayoutParams(dp(76), dp(46)))
+        }, LinearLayout.LayoutParams(dp(72), dp(46)))
         root.addView(header)
 
         settingsSummaryView = TextView(this).apply {
@@ -303,7 +323,7 @@ class MainActivity : Activity() {
         root.addView(actions, matchWrap(top = 18))
 
         root.addView(TextView(this).apply {
-            text = "本地智能断句已开启 · 支持自动 Commit 与实时打断"
+            text = "支持智能断句 · 原生实时语音 · 随时打断"
             textSize = 11f
             gravity = Gravity.CENTER
             setTextColor(Color.rgb(142, 150, 168))
@@ -315,15 +335,40 @@ class MainActivity : Activity() {
     private fun fetchCapabilities() {
         mobileApi.fetchCapabilities { result ->
             runOnUiThread {
+                if (destroyed) return@runOnUiThread
                 result.onSuccess { capabilities ->
                     ClientCapabilitiesCache.save(this, capabilities)
-                    val available = capabilities.voices.any { it.id == settings.voiceId }
-                    if (!available && capabilities.voices.isNotEmpty()) {
-                        settings = settings.copy(voiceId = capabilities.defaultVoice)
-                        AppSettings.save(this, settings)
-                        lastAppliedSettings = settings
+                    var nextSettings = settings
+                    if (!AppSettings.hasPersistedExperienceMode(this)) {
+                        val selected = selectInitialExperience(capabilities)
+                        nextSettings = nextSettings.copy(
+                            experienceMode = selected.experienceMode,
+                            voiceId = selected.voiceId,
+                        )
+                    } else {
+                        val selectedMode = capabilities.mode(nextSettings.experienceMode)
+                        if (selectedMode != null && selectedMode.voices.none { it.id == nextSettings.voiceId }) {
+                            val replacementVoice = selectedMode.defaultVoice
+                                .takeIf { candidate -> selectedMode.voices.any { it.id == candidate } }
+                                ?: selectedMode.voices.firstOrNull()?.id
+                            if (!replacementVoice.isNullOrBlank()) {
+                                nextSettings = nextSettings.copy(voiceId = replacementVoice)
+                            }
+                        }
+                    }
+                    if (nextSettings != settings) {
+                        settings = nextSettings
+                        lastAppliedSettings = nextSettings
+                        AppSettings.save(this, nextSettings)
+                        audioEngine.updatePreferences(nextSettings)
                     }
                     refreshSettingsSummary()
+                }
+                if (!initialExperienceResolved) {
+                    initialExperienceResolved = true
+                    if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                        connectAutomatically()
+                    }
                 }
             }
         }
@@ -339,8 +384,20 @@ class MainActivity : Activity() {
 
     private fun connectAutomatically() {
         if (destroyed || connectionAttempt || sessionActive) return
+        if (!initialExperienceResolved) {
+            updateStatus("正在选择最佳语音", "优先检测 ChatGPT Live / GPT-Live 可用性", VoiceOrbView.State.CONNECTING)
+            return
+        }
         connectionAttempt = true
-        updateStatus("正在连接小派", "自动获取安全会话", VoiceOrbView.State.CONNECTING)
+        if (isChat2ApiLiveMode()) {
+            upstreamStatusSummary = "GPT-Live · 正在连接"
+            refreshSettingsSummary()
+        }
+        updateStatus(
+            if (isChat2ApiLiveMode()) "正在连接 ChatGPT Live" else "正在连接小派",
+            "自动获取安全会话",
+            VoiceOrbView.State.CONNECTING,
+        )
         val deviceId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID)
             ?: "android-device-${System.currentTimeMillis()}"
         mobileApi.bootstrap(deviceId) { result ->
@@ -351,6 +408,7 @@ class MainActivity : Activity() {
                     settings = AppSettings.load(this)
                     lastAppliedSettings = settings
                     audioEngine.updatePreferences(settings)
+                    refreshSettingsSummary()
                     realtimeClient.connect(
                         mobileApi.websocketUrl(bootstrap.websocketPath),
                         bootstrap.token,
@@ -360,6 +418,7 @@ class MainActivity : Activity() {
                         settings,
                     )
                 }.onFailure { error ->
+                    LiveDiagnosticsStore.recordGateway("Bootstrap 失败：${error.message ?: error.javaClass.simpleName}")
                     updateStatus("暂时无法连接", error.message ?: "请稍后重试", VoiceOrbView.State.ERROR)
                 }
             }
@@ -371,8 +430,10 @@ class MainActivity : Activity() {
         responseWatchdogGeneration += 1
         sessionActive = false
         connectionAttempt = false
+        if (isChat2ApiLiveMode()) upstreamStatusSummary = "GPT-Live · 正在重连"
         realtimeClient.close()
         stopAudioAsync()
+        refreshSettingsSummary()
         handler.postDelayed({ connectAutomatically() }, 450)
     }
 
@@ -395,6 +456,7 @@ class MainActivity : Activity() {
     }
 
     private fun handleConnectionState(message: String) {
+        LiveDiagnosticsStore.recordGateway(message)
         if (message.startsWith("连接失败") || message == "连接已断开") {
             invalidateAudioStartup()
             responseWatchdogGeneration += 1
@@ -402,7 +464,11 @@ class MainActivity : Activity() {
             stopAudioAsync()
             updateStatus("连接中断", "正在等待自动重连，也可点击重新连接", VoiceOrbView.State.ERROR)
         } else if (message.contains("正在连接") || message.contains("安全连接")) {
-            updateStatus("正在连接小派", message, VoiceOrbView.State.CONNECTING)
+            updateStatus(
+                if (isChat2ApiLiveMode()) "正在连接 ChatGPT Live" else "正在连接小派",
+                message,
+                VoiceOrbView.State.CONNECTING,
+            )
             if (message.contains("安全连接") && !pendingCrashUploaded) {
                 ClientCrashDiagnostics.consume(this)?.let { details ->
                     if (realtimeClient.sendTelemetry("android_previous_crash", details = details)) {
@@ -415,7 +481,30 @@ class MainActivity : Activity() {
 
     private fun handleServerEvent(event: JSONObject) {
         when (event.optString("type")) {
-            "session.created" -> updateStatus("正在启动语音", "服务端 ASR 会话准备中", VoiceOrbView.State.CONNECTING)
+            "upstream.status" -> {
+                if (event.optString("provider") != "chat2api_live") return
+                LiveDiagnosticsStore.recordUpstream(event)
+                val state = event.optString("state")
+                val ui = chat2ApiUpstreamUiStatus(
+                    state = state,
+                    detail = event.optString("detail"),
+                    attempt = event.optInt("attempt", 0),
+                )
+                upstreamStatusSummary = ui.summary
+                refreshSettingsSummary()
+                if (state == "closed" && destroyed) return
+                val orbState = if (state == "ready" && sessionActive) {
+                    if (micPaused) VoiceOrbView.State.PAUSED else VoiceOrbView.State.LISTENING
+                } else {
+                    VoiceOrbView.State.CONNECTING
+                }
+                updateStatus(ui.title, ui.subtitle, orbState)
+            }
+            "session.created" -> updateStatus(
+                "正在启动语音",
+                if (isChat2ApiLiveMode()) "正在建立 chat2api / ChatGPT Voice 原生实时会话" else "服务端实时语音会话准备中",
+                VoiceOrbView.State.CONNECTING,
+            )
             "session.ready" -> {
                 sessionActive = true
                 realtimeClient.sendTelemetry("session_ready_received")
@@ -556,12 +645,13 @@ class MainActivity : Activity() {
 
     private fun updateStatus(title: String, subtitle: String, state: VoiceOrbView.State) {
         statusView.text = title
+        val liveTag = if (isChat2ApiLiveMode()) "GPT-Live" else null
         statusPill.text = when (state) {
-            VoiceOrbView.State.CONNECTING -> "连接中"
-            VoiceOrbView.State.LISTENING -> "在线 · 正在聆听"
-            VoiceOrbView.State.THINKING -> "在线 · 正在思考"
-            VoiceOrbView.State.SPEAKING -> "在线 · 正在回答"
-            VoiceOrbView.State.PAUSED -> "在线 · 已暂停"
+            VoiceOrbView.State.CONNECTING -> if (liveTag != null) "连接中 · $liveTag" else "连接中"
+            VoiceOrbView.State.LISTENING -> if (liveTag != null) "在线 · $liveTag · 聆听" else "在线 · 正在聆听"
+            VoiceOrbView.State.THINKING -> if (liveTag != null) "在线 · $liveTag · 思考" else "在线 · 正在思考"
+            VoiceOrbView.State.SPEAKING -> if (liveTag != null) "在线 · $liveTag · 回答" else "在线 · 正在回答"
+            VoiceOrbView.State.PAUSED -> if (liveTag != null) "在线 · $liveTag · 已暂停" else "在线 · 已暂停"
             VoiceOrbView.State.ERROR -> "连接异常"
         }
         meterView.text = subtitle
@@ -569,15 +659,31 @@ class MainActivity : Activity() {
     }
 
     private fun refreshSettingsSummary() {
-        val voice = ClientCapabilitiesCache.loadVoices(this).firstOrNull { it.id == settings.voiceId }
-        val mode = when (settings.interactionMode) {
+        val experiences = ClientCapabilitiesCache.loadExperienceModes(this)
+        val experience = experiences.firstOrNull { it.id == settings.experienceMode }
+        val voice = experience?.voices?.firstOrNull { it.id == settings.voiceId }
+            ?: ClientCapabilitiesCache.loadVoices(this).firstOrNull { it.id == settings.voiceId }
+        val interaction = when (settings.interactionMode) {
             "owner_focus" -> "专注主人"
             "group" -> "多人聊天"
             else -> "自动模式"
         }
-        settingsSummaryView.text = "${voice?.name ?: settings.voiceId} · $mode · ${settings.endpointProfile.title}断句"
+        val experienceLabel = when {
+            experience?.id == "chat2api_live" -> "ChatGPT Live · chat2api · ${experience.model.ifBlank { "gpt-live" }}"
+            experience != null -> "${experience.title.substringBefore(" · 未启用")} · ${experience.model}"
+            settings.experienceMode == "chat2api_live" -> "ChatGPT Live · chat2api · gpt-live"
+            else -> settings.experienceMode
+        }
+        val upstream = upstreamStatusSummary?.takeIf { isChat2ApiLiveMode() }?.let { " · $it" }.orEmpty()
+        settingsSummaryView.text = "$experienceLabel · ${voice?.name ?: settings.voiceId} · $interaction · ${settings.endpointProfile.title}断句$upstream"
         transcriptCard.visibility = if (settings.showTranscript) View.VISIBLE else View.GONE
     }
+
+    private fun isChat2ApiLiveMode(): Boolean = settings.experienceMode == "chat2api_live"
+
+    private fun isNativeExperienceMode(): Boolean = ClientCapabilitiesCache.loadExperienceModes(this)
+        .firstOrNull { it.id == settings.experienceMode }
+        ?.engine == "omni_realtime"
 
     private fun renderLatency() {
         fun delta(from: Long, to: Long): String = if (from > 0 && to >= from) "${to - from} ms" else "—"

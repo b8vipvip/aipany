@@ -136,7 +136,7 @@ jobs:
           if [[ "$SIGNING_READY" == "true" ]]; then
             source_apk="apps/android/app/build/outputs/apk/release/app-release.apk"
             output_apk="Aipany.apk"
-            channel="development-preview"
+            channel="stable"
           else
             source_apk="apps/android/app/build/outputs/apk/debug/app-debug.apk"
             output_apk="Aipany-${VERSION_NAME}-dev.apk"
@@ -158,7 +158,7 @@ jobs:
               "sha256": os.environ["APK_SHA"],
               "mandatory": False,
               "publishedAt": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
-              "releaseNotes": "Aipany Android 新版本：设置界面、语音体验、稳定性与更新能力持续优化。",
+              "releaseNotes": "Aipany Android 正式版：ChatGPT Live / GPT-Live 实时语音、自动恢复、实时链路诊断与一键诊断报告，并持续优化稳定性与更新能力。",
           }
           with open("update.json", "w", encoding="utf-8") as handle:
               json.dump(payload, handle, ensure_ascii=False, indent=2)
@@ -174,7 +174,7 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
-      - name: Publish android-latest GitHub Release
+      - name: Publish stable android-latest GitHub Release
         if: github.event_name == 'push' && steps.signing.outputs.ready == 'true'
         shell: bash
         env:
@@ -189,5 +189,4 @@ jobs:
             apps/android/dist/SHA256SUMS.txt \
             --target "$GITHUB_SHA" \
             --title "Aipany Android ${VERSION_NAME}" \
-            --notes "Aipany Android 开发预览版自动更新通道。安装包已使用固定发布密钥签名并提供 SHA-256 校验。" \
-            --prerelease
+            --notes "Aipany Android 正式稳定版。安装包使用固定发布密钥签名，并提供 SHA-256 完整性校验；本版本包含 ChatGPT Live / GPT-Live 实时语音、自动恢复、链路诊断与一键诊断报告。"

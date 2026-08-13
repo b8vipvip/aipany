@@ -97,6 +97,15 @@ export type UserEmotion =
   | "fearful"
   | "unknown";
 
+export type RealtimeUpstreamState =
+  | "connecting"
+  | "bridge_connected"
+  | "ready"
+  | "recovering"
+  | "degraded"
+  | "unavailable"
+  | "closed";
+
 export interface SpeakerAttribution {
   sessionSpeakerId: string;
   personId?: string;
@@ -141,6 +150,14 @@ export interface AudioFormat {
 export type ServerEvent =
   | { type: "session.created"; sessionId: string; inputAudio: AudioFormat; outputAudio: AudioFormat }
   | { type: "session.ready"; sessionId: string }
+  | {
+      type: "upstream.status";
+      provider: "chat2api_live";
+      state: RealtimeUpstreamState;
+      model: string;
+      detail?: string;
+      attempt?: number;
+    }
   | { type: "input_audio_buffer.speech_started" }
   | { type: "input_audio_buffer.speech_stopped" }
   | { type: "transcript.partial"; text: string; emotion: UserEmotion; language?: string }

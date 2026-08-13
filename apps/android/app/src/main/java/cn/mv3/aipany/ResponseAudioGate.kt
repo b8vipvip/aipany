@@ -22,6 +22,7 @@ class ResponseAudioGate {
         activeResponseId = responseId?.takeIf { it.isNotBlank() }
         responseAccepting = false
         responseCancelled = false
+        if (activeResponseId != null) LiveLatencyTracker.responseCreated()
     }
 
     @Synchronized
@@ -30,6 +31,7 @@ class ResponseAudioGate {
         if (responseCancelled || activeResponseId == null) return false
         if (incoming != null && incoming != activeResponseId) return false
         responseAccepting = true
+        LiveLatencyTracker.audioStarted()
         return true
     }
 
