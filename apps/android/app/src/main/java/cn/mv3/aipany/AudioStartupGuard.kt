@@ -15,6 +15,7 @@ class AudioStartupGuard(
     private var generation = 0L
     private var active: Token? = null
     private var readyGeneration: Long? = null
+    private var timedOutGeneration: Long? = null
 
     @Synchronized
     fun begin(nowMs: Long): Token {
@@ -22,6 +23,8 @@ class AudioStartupGuard(
         return Token(generation, nowMs).also {
             active = it
             readyGeneration = null
+            timedOutGeneration = null
+            LiveDiagnosticsStore.recordAndroidAudio("audio_start_requested", "Android audio startup requested")
         }
     }
 
@@ -30,6 +33,8 @@ class AudioStartupGuard(
         if (active?.generation != token.generation) return false
         readyGeneration = token.generation
         active = null
+        timedOutGeneration = null
+        LiveDiagnosticsStore.recordAndroidAudio("audio_ready", "Android audio ready")
         return true
     }
 
@@ -38,12 +43,20 @@ class AudioStartupGuard(
         if (active?.generation != token.generation) return false
         active = null
         readyGeneration = null
+        if (timedOutGeneration != token.generation) {
+            LiveDiagnosticsStore.recordAndroidAudio("audio_failed", "Android audio startup failed")
+        }
         return true
     }
 
     @Synchronized
     fun isTimedOut(token: Token, nowMs: Long): Boolean {
-        return active?.generation == token.generation && nowMs - token.startedAtMs >= timeoutMs
+        val timedOut = active?.generation == token.generation && nowMs - token.startedAtMs >= timeoutMs
+        if (timedOut && timedOutGeneration != token.generation) {
+            timedOutGeneration = token.generation
+            LiveDiagnosticsStore.recordAndroidAudio("audio_timeout", "Android audio startup exceeded ${timeoutMs} ms")
+        }
+        return timedOut
     }
 
     @Synchronized
@@ -51,6 +64,7 @@ class AudioStartupGuard(
         generation += 1
         active = null
         readyGeneration = null
+        timedOutGeneration = null
     }
 
     @Synchronized
