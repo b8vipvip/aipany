@@ -4,12 +4,14 @@ import {
   INPUT_AUDIO_FORMAT,
   OUTPUT_AUDIO_FORMAT,
   type InteractionMode,
+  type RealtimeUpstreamState,
   type ServerEvent,
   type SessionStartEvent,
 } from "@aipany/protocol";
 import { assertSessionIdentity, requireScope, type AuthContext } from "../auth.js";
 import type { AppConfig } from "../config.js";
 import { resolveRequestedVoice } from "../mobile/client-capabilities.js";
+import { isChat2ApiRealtimeModel } from "../mobile/realtime-experience.js";
 import { recordGlobalRealtimeEvent } from "../observability/global-observability.js";
 import type { ObservabilityLevel, SessionObservability } from "../observability/realtime-observability.js";
 import {
@@ -187,6 +189,10 @@ export class QwenOmniLiveSession {
     // Forwarded client-protocol events are observed once by server.ts through
     // instrumentOutgoingWebSocket(). Do not record the same semantic event here,
     // otherwise Native Live turns, interruptions and latency samples are doubled.
+    provider.on("upstreamStatus", (state, detail) => {
+      if (this.provider !== provider) return;
+      this.sendChat2ApiStatus(state, detail);
+    });
     provider.on("speechStarted", () => {
       if (this.provider !== provider) return;
       this.transcriptBuffer = "";
@@ -264,6 +270,7 @@ export class QwenOmniLiveSession {
     if (this.closed || this.recoveryPromise) return;
     this.interruptActiveResponseForRecovery();
     const startedAt = Date.now();
+    this.sendChat2ApiStatus("recovering", reason || `upstream closed (${code})`, 1);
     this.observe("omni.recovery.started", {
       code,
       reason,
@@ -282,6 +289,7 @@ export class QwenOmniLiveSession {
       if (delayMs > 0) await delay(delayMs);
       if (this.closed) return;
       const attempt = index + 1;
+      this.sendChat2ApiStatus("recovering", `自动恢复第 ${attempt}/${RECOVERY_DELAYS_MS.length} 次`, attempt);
       try {
         await this.openProvider();
         const bufferedAudio = this.recoveryAudioBuffer;
@@ -308,6 +316,7 @@ export class QwenOmniLiveSession {
       attempts: RECOVERY_DELAYS_MS.length,
       message,
     }, "error", "omni");
+    this.sendChat2ApiStatus("unavailable", message, RECOVERY_DELAYS_MS.length);
     this.sendError("OMNI_REALTIME_RECOVERY_FAILED", `Native Live 自动恢复失败：${message}`, true);
     queueMicrotask(() => {
       if (this.client.readyState === WebSocket.OPEN || this.client.readyState === WebSocket.CONNECTING) {
@@ -333,6 +342,18 @@ export class QwenOmniLiveSession {
     this.recoveryAudioBuffer = combined.length <= RECOVERY_AUDIO_BUFFER_MAX_BYTES
       ? combined
       : combined.subarray(combined.length - RECOVERY_AUDIO_BUFFER_MAX_BYTES);
+  }
+
+  private sendChat2ApiStatus(state: RealtimeUpstreamState, detail?: string, attempt?: number): void {
+    if (!isChat2ApiRealtimeModel(this.config.qwenOmniRealtime.model)) return;
+    this.send({
+      type: "upstream.status",
+      provider: "chat2api_live",
+      state,
+      model: this.config.qwenOmniRealtime.model,
+      ...(detail ? { detail } : {}),
+      ...(attempt ? { attempt } : {}),
+    });
   }
 
   private observe(
