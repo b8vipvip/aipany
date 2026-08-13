@@ -217,6 +217,15 @@ class MainActivity : Activity() {
             })
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         header.addView(Button(this).apply {
+            text = "诊断"
+            textSize = 13f
+            background = rounded(Color.WHITE, dp(14).toFloat(), Color.rgb(226, 229, 238))
+            setOnClickListener {
+                runCatching { startActivity(Intent(this@MainActivity, LiveDiagnosticsActivity::class.java)) }
+                    .onFailure { Toast.makeText(this@MainActivity, "诊断页打开失败：${it.javaClass.simpleName}", Toast.LENGTH_LONG).show() }
+            }
+        }, LinearLayout.LayoutParams(dp(72), dp(46)).apply { marginEnd = dp(6) })
+        header.addView(Button(this).apply {
             text = "设置"
             textSize = 14f
             background = rounded(Color.WHITE, dp(14).toFloat(), Color.rgb(226, 229, 238))
@@ -224,7 +233,7 @@ class MainActivity : Activity() {
                 runCatching { startActivity(Intent(this@MainActivity, SettingsActivity::class.java)) }
                     .onFailure { Toast.makeText(this@MainActivity, "设置页打开失败：${it.javaClass.simpleName}", Toast.LENGTH_LONG).show() }
             }
-        }, LinearLayout.LayoutParams(dp(76), dp(46)))
+        }, LinearLayout.LayoutParams(dp(72), dp(46)))
         root.addView(header)
 
         settingsSummaryView = TextView(this).apply {
@@ -409,6 +418,7 @@ class MainActivity : Activity() {
                         settings,
                     )
                 }.onFailure { error ->
+                    LiveDiagnosticsStore.recordGateway("Bootstrap 失败：${error.message ?: error.javaClass.simpleName}")
                     updateStatus("暂时无法连接", error.message ?: "请稍后重试", VoiceOrbView.State.ERROR)
                 }
             }
@@ -446,6 +456,7 @@ class MainActivity : Activity() {
     }
 
     private fun handleConnectionState(message: String) {
+        LiveDiagnosticsStore.recordGateway(message)
         if (message.startsWith("连接失败") || message == "连接已断开") {
             invalidateAudioStartup()
             responseWatchdogGeneration += 1
@@ -472,6 +483,7 @@ class MainActivity : Activity() {
         when (event.optString("type")) {
             "upstream.status" -> {
                 if (event.optString("provider") != "chat2api_live") return
+                LiveDiagnosticsStore.recordUpstream(event)
                 val state = event.optString("state")
                 val ui = chat2ApiUpstreamUiStatus(
                     state = state,
