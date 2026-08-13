@@ -26,6 +26,9 @@ interface Chat2ApiLiveEvents {
 }
 
 const LIVE_INPUT_FRAME_BYTES = 1280; // 40 ms PCM16 mono @ 16 kHz
+const LIVE_STARTUP_TIMEOUT_MS = 20_000;
+const LIVE_HEARTBEAT_INTERVAL_MS = 15_000;
+const LIVE_HEARTBEAT_TIMEOUT_MS = 45_000;
 
 /**
  * Native speech-to-speech bridge backed by the user's chat2api browser service.
@@ -40,6 +43,8 @@ export class Chat2ApiLiveClient extends EventEmitter<Chat2ApiLiveEvents> {
   private currentResponseId?: string;
   private readonly responseText = new Map<string, string>();
   private inputBuffer = Buffer.alloc(0);
+  private heartbeatTimer?: ReturnType<typeof setInterval>;
+  private lastPongAt = 0;
 
   constructor(private readonly config: Chat2ApiLiveConfig) {
     super();
@@ -50,6 +55,7 @@ export class Chat2ApiLiveClient extends EventEmitter<Chat2ApiLiveEvents> {
     this.connectPromise = new Promise<void>((resolve, reject) => {
       const url = buildLiveUrl(this.config.baseUrl, this.config.clientId);
       let settled = false;
+      let startupTimer: ReturnType<typeof setTimeout> | undefined;
       const ws = new WebSocket(url, {
         headers: {
           Authorization: `Bearer ${this.config.apiKey}`,
@@ -59,13 +65,32 @@ export class Chat2ApiLiveClient extends EventEmitter<Chat2ApiLiveEvents> {
       });
       this.ws = ws;
 
+      const clearStartupTimer = () => {
+        if (!startupTimer) return;
+        clearTimeout(startupTimer);
+        startupTimer = undefined;
+      };
+
       const failBeforeReady = (error: Error) => {
         if (!settled) {
           settled = true;
+          clearStartupTimer();
           reject(error);
+          this.emit("error", error);
+          return;
         }
         this.emit("error", error);
       };
+
+      startupTimer = setTimeout(() => {
+        if (settled || this.ready || this.closed) return;
+        const error = new Error(`Chat2API GPT-Live 启动超时（>${LIVE_STARTUP_TIMEOUT_MS / 1000}s）`);
+        failBeforeReady(error);
+        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+          ws.close(1011, "chat2api live startup timeout");
+        }
+      }, LIVE_STARTUP_TIMEOUT_MS);
+      startupTimer.unref();
 
       ws.on("open", () => {
         this.send({
@@ -89,11 +114,26 @@ export class Chat2ApiLiveClient extends EventEmitter<Chat2ApiLiveEvents> {
           const type = stringValue(event.type);
           if (type === "session.ready") {
             this.ready = true;
+            this.lastPongAt = Date.now();
+            clearStartupTimer();
+            this.startHeartbeat();
             if (!settled) {
               settled = true;
               resolve();
             }
             this.emit("ready");
+            return;
+          }
+          if (type === "session.closed") {
+            this.ready = false;
+            this.stopHeartbeat();
+            if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+              ws.close(1012, "chat2api live upstream session closed");
+            }
+            return;
+          }
+          if (type === "pong") {
+            this.lastPongAt = Date.now();
             return;
           }
           if (type === "input_audio_buffer.speech_started") {
@@ -159,16 +199,28 @@ export class Chat2ApiLiveClient extends EventEmitter<Chat2ApiLiveEvents> {
           if (type === "error") {
             const code = stringValue(event.code);
             const message = stringValue(event.message) || "未知错误";
-            this.emit("error", new Error(`Chat2API GPT-Live 错误${code ? `(${code})` : ""}：${message}`));
+            const error = new Error(`Chat2API GPT-Live 错误${code ? `(${code})` : ""}：${message}`);
+            if (!this.ready && !settled) {
+              failBeforeReady(error);
+              if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+                ws.close(1011, "chat2api live startup error");
+              }
+            } else {
+              this.emit("error", error);
+            }
             return;
           }
         } catch (error) {
-          this.emit("error", error instanceof Error ? error : new Error(String(error)));
+          const normalized = error instanceof Error ? error : new Error(String(error));
+          if (!this.ready && !settled) failBeforeReady(normalized);
+          else this.emit("error", normalized);
         }
       });
 
       ws.on("error", (error) => failBeforeReady(error));
       ws.on("close", (code, reason) => {
+        clearStartupTimer();
+        this.stopHeartbeat();
         this.ready = false;
         this.ws = undefined;
         this.inputBuffer = Buffer.alloc(0);
@@ -216,10 +268,33 @@ export class Chat2ApiLiveClient extends EventEmitter<Chat2ApiLiveEvents> {
     this.flushInput();
     this.closed = true;
     this.ready = false;
+    this.stopHeartbeat();
     this.send({ type: "session.finish" });
     this.ws?.close(1000, "session finished");
     this.ws = undefined;
     this.inputBuffer = Buffer.alloc(0);
+  }
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    this.lastPongAt = Date.now();
+    this.heartbeatTimer = setInterval(() => {
+      const ws = this.ws;
+      if (this.closed || !this.ready || !ws || ws.readyState !== WebSocket.OPEN) return;
+      if (Date.now() - this.lastPongAt > LIVE_HEARTBEAT_TIMEOUT_MS) {
+        this.ready = false;
+        ws.close(1012, "chat2api live heartbeat timeout");
+        return;
+      }
+      this.send({ type: "ping", timestamp: Date.now() });
+    }, LIVE_HEARTBEAT_INTERVAL_MS);
+    this.heartbeatTimer.unref();
+  }
+
+  private stopHeartbeat(): void {
+    if (!this.heartbeatTimer) return;
+    clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = undefined;
   }
 
   private flushInput(): void {
