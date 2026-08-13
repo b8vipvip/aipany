@@ -122,3 +122,107 @@ test("gpt-live model delegates the existing native client contract to Chat2API",
     await new Promise<void>((resolve) => http.close(() => resolve()));
   }
 });
+
+test("Chat2API startup error rejects the native session instead of hanging", async () => {
+  const http = createServer();
+  const wss = new WebSocketServer({ server: http });
+  await new Promise<void>((resolve) => http.listen(0, "127.0.0.1", resolve));
+  const address = http.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  wss.on("connection", (socket) => {
+    socket.on("message", (raw, isBinary) => {
+      if (isBinary) return;
+      const event = JSON.parse(raw.toString()) as Record<string, unknown>;
+      if (event.type === "session.start") {
+        socket.send(JSON.stringify({
+          type: "error",
+          code: "GPT_LIVE_BROWSER_ERROR",
+          message: "voice tab unavailable",
+          retryable: true,
+        }));
+      }
+    });
+  });
+
+  try {
+    await withEnvironment({
+      CHAT2API_LIVE_ENABLED: "true",
+      CHAT2API_LIVE_API_KEY: "bridge-key",
+      CHAT2API_LIVE_BASE_URL: baseUrl,
+      CHAT2API_LIVE_MODEL: "gpt-live",
+    }, async () => {
+      const client = new QwenOmniRealtimeClient({
+        apiKey: "not-used-for-chat2api",
+        baseUrl: "wss://qwen.invalid/realtime",
+        model: "gpt-live",
+        voice: "chatgpt-current",
+        instructions: "自然聊天",
+        turnDetection: "smart_turn",
+        vadThreshold: 0.2,
+        silenceMs: 500,
+      });
+      client.on("error", () => {});
+      await assert.rejects(client.connect(), /voice tab unavailable/u);
+      client.close();
+    });
+  } finally {
+    for (const client of wss.clients) client.close();
+    await new Promise<void>((resolve) => wss.close(() => resolve()));
+    await new Promise<void>((resolve) => http.close(() => resolve()));
+  }
+});
+
+test("Chat2API session.closed closes the provider so Aipany recovery can reopen it", async () => {
+  const http = createServer();
+  const wss = new WebSocketServer({ server: http });
+  await new Promise<void>((resolve) => http.listen(0, "127.0.0.1", resolve));
+  const address = http.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  wss.on("connection", (socket) => {
+    socket.on("message", (raw, isBinary) => {
+      if (isBinary) return;
+      const event = JSON.parse(raw.toString()) as Record<string, unknown>;
+      if (event.type === "session.start") {
+        socket.send(JSON.stringify({ type: "session.ready", session_id: "s1" }));
+        setImmediate(() => socket.send(JSON.stringify({ type: "session.closed", session_id: "s1" })));
+      }
+    });
+  });
+
+  try {
+    await withEnvironment({
+      CHAT2API_LIVE_ENABLED: "true",
+      CHAT2API_LIVE_API_KEY: "bridge-key",
+      CHAT2API_LIVE_BASE_URL: baseUrl,
+      CHAT2API_LIVE_MODEL: "gpt-live",
+    }, async () => {
+      const client = new QwenOmniRealtimeClient({
+        apiKey: "not-used-for-chat2api",
+        baseUrl: "wss://qwen.invalid/realtime",
+        model: "gpt-live",
+        voice: "chatgpt-current",
+        instructions: "自然聊天",
+        turnDetection: "smart_turn",
+        vadThreshold: 0.2,
+        silenceMs: 500,
+      });
+      client.on("error", () => {});
+      const closed = new Promise<{ code: number; reason: string }>((resolve) => {
+        client.once("close", (code, reason) => resolve({ code, reason }));
+      });
+      await client.connect();
+      const result = await closed;
+      assert.equal(result.code, 1012);
+      assert.match(result.reason, /upstream session closed/u);
+      client.close();
+    });
+  } finally {
+    for (const client of wss.clients) client.close();
+    await new Promise<void>((resolve) => wss.close(() => resolve()));
+    await new Promise<void>((resolve) => http.close(() => resolve()));
+  }
+});
