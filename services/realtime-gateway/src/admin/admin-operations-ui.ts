@@ -2,6 +2,7 @@ export const ADMIN_OPERATIONS_UI = String.raw`(() => {
   const STORAGE_KEY = "aipanyAdminToken";
   const $ = (id) => document.getElementById(id);
   let operationsLoaded = false;
+  let realtimeLoaded = false;
   const authHeaders = () => ({
     Authorization: "Bearer " + (sessionStorage.getItem(STORAGE_KEY) || ""),
     "Content-Type": "application/json",
@@ -24,6 +25,218 @@ export const ADMIN_OPERATIONS_UI = String.raw`(() => {
       description.textContent = passwordEnabled
         ? "输入控制面板密码。密码仅保存在当前浏览器会话中。"
         : "当前未开启应用层密码保护，将自动进入控制面板。";
+    }
+  }
+
+  function installUnifiedNavigation() {
+    const nav = $("nav");
+    const realtimeLink = nav && nav.querySelector('[data-route="dashscope"]');
+    const audioLink = nav && nav.querySelector('[data-route="omni"]');
+    const remoteLink = nav && nav.querySelector('[data-route="remote"]');
+    if (realtimeLink) realtimeLink.textContent = "实时语音";
+    if (audioLink) audioLink.textContent = "音频智能";
+    if (remoteLink) remoteLink.style.display = "none";
+
+    const mobile = $("mobileNav");
+    if (mobile) {
+      const dashOption = mobile.querySelector('option[value="dashscope"]');
+      const omniOption = mobile.querySelector('option[value="omni"]');
+      const remoteOption = mobile.querySelector('option[value="remote"]');
+      if (dashOption) dashOption.textContent = "实时语音";
+      if (omniOption) omniOption.textContent = "音频智能";
+      if (remoteOption) remoteOption.remove();
+    }
+
+    const realtimePage = document.querySelector('[data-page="dashscope"]');
+    if (realtimePage) {
+      const head = realtimePage.querySelector(".page-head");
+      if (head) head.innerHTML = '<h2>实时语音</h2><p>只在这里选择和配置实时对话链路：ChatGPT Live、Qwen Native Live 或 Economy Live。</p>';
+    }
+
+    const audioPage = document.querySelector('[data-page="omni"]');
+    if (audioPage) {
+      const head = audioPage.querySelector(".page-head");
+      if (head) head.innerHTML = '<h2>音频智能</h2><p>环境理解、多人转写、声纹与远程语音分离等增强能力；它们不是实时语音引擎。</p>';
+      const cloudCard = audioPage.querySelector(".card");
+      if (cloudCard && !cloudCard.querySelector("[data-audio-card-title]")) {
+        const title = document.createElement("div");
+        title.setAttribute("data-audio-card-title", "true");
+        title.innerHTML = '<h3 style="margin:0 0 5px">Qwen Omni Cloud Audio</h3><div class="hint" style="margin-bottom:16px">用于环境理解、音频事件和云端多人转写，不决定 App 使用哪种实时语音模式。</div>';
+        cloudCard.insertBefore(title, cloudCard.firstChild);
+      }
+      const remotePage = document.querySelector('[data-page="remote"]');
+      const remoteCard = remotePage && remotePage.querySelector(".card");
+      if (remoteCard && !$("audioRemoteTitle")) {
+        const title = document.createElement("div");
+        title.id = "audioRemoteTitle";
+        title.innerHTML = '<h3 style="margin:0 0 5px">Remote GPU / SepFormer</h3><div class="hint" style="margin-bottom:16px">可选的远程语音分离与目标说话人提取 Worker。</div>';
+        remoteCard.insertBefore(title, remoteCard.firstChild);
+        audioPage.appendChild(remoteCard);
+      }
+      const remotePageNow = document.querySelector('[data-page="remote"]');
+      if (remotePageNow && !remotePageNow.querySelector(".section-note")) {
+        remotePageNow.innerHTML = '<div class="page-head"><h2>Remote GPU</h2></div><div class="section-note">Remote GPU 配置已经合并到“音频智能”页面。</div>';
+      }
+    }
+
+    const quickRealtime = document.querySelector('[data-go="dashscope"]');
+    if (quickRealtime) quickRealtime.textContent = "配置实时语音模式";
+
+    const overview = document.querySelector('[data-page="overview"] .overview-grid');
+    if (overview) {
+      const cards = overview.querySelectorAll(".metric");
+      if (cards[0] && cards[0].querySelector("small")) cards[0].querySelector("small").textContent = "实时语音";
+      if (cards[1] && cards[1].querySelector("small")) cards[1].querySelector("small").textContent = "音频智能";
+      if (cards[3] && cards[3].querySelector("small")) cards[3].querySelector("small").textContent = "ChatGPT Live";
+    }
+  }
+
+  function installRealtimeConsole() {
+    if ($("chat2apiLiveCard")) return;
+    installUnifiedNavigation();
+    const page = document.querySelector('[data-page="dashscope"]');
+    if (!page) return;
+    const oldEconomyCard = page.querySelector(".card");
+
+    const style = document.createElement("style");
+    style.id = "aipanyRealtimeConsoleStyle";
+    style.textContent = '.realtime-mode-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:18px}.realtime-mode{border:1px solid #e4e7ec;border-radius:14px;padding:16px;background:#fff}.realtime-mode strong{display:block;margin-bottom:5px}.realtime-mode .mode-state{margin-top:10px}.realtime-recommended{border-color:#aeb8ff;background:#f8f9ff}.advanced-box{margin-top:14px;padding-top:14px;border-top:1px solid #eaecf0}@media(max-width:800px){.realtime-mode-grid{grid-template-columns:1fr}}';
+    document.head.appendChild(style);
+
+    const summary = document.createElement("div");
+    summary.className = "realtime-mode-grid";
+    summary.id = "realtimeModeSummary";
+    summary.innerHTML = '<div class="realtime-mode realtime-recommended"><strong>ChatGPT Live <span class="badge good">推荐</span></strong><div class="hint">Chat2API → ChatGPT Voice，原生实时语音。新安装 App 在可用时优先选择。</div><div id="summaryChat2Api" class="mode-state status">检查中…</div></div><div class="realtime-mode"><strong>Qwen Native Live</strong><div class="hint">Qwen Audio / Omni 端到端实时语音，作为原生实时备选。</div><div id="summaryNative" class="mode-state status">检查中…</div></div><div class="realtime-mode"><strong>Economy Live</strong><div class="hint">ASR → 文本 LLM → TTS，成本最低，也作为不可用时的兜底。</div><div id="summaryEconomy" class="mode-state status ok">始终可用</div></div>';
+    if (oldEconomyCard) page.insertBefore(summary, oldEconomyCard);
+    else page.appendChild(summary);
+
+    const chat = document.createElement("div");
+    chat.id = "chat2apiLiveCard";
+    chat.className = "card";
+    chat.innerHTML = '<div class="toolbar"><div><h3 style="margin:0 0 5px">ChatGPT Live</h3><div class="hint">通过 Chat2API 连接已登录的 ChatGPT Voice。保存后新会话立即生效，无需重建 Docker。</div></div><div class="actions"><button class="btn secondary" id="checkChat2ApiLiveBtn" type="button">检查可用性</button><button class="btn primary" id="saveChat2ApiLiveBtn" type="button">保存 ChatGPT Live</button></div></div><div class="grid"><div class="field"><label>ChatGPT Live</label><select id="CHAT2API_LIVE_ENABLED"><option value="true">开启</option><option value="false">关闭</option></select></div><div class="field"><label>模型</label><select id="CHAT2API_LIVE_MODEL"><option value="gpt-live">gpt-live</option><option value="gpt-live-mini">gpt-live-mini</option></select></div><div class="field full"><label>Chat2API Base URL</label><input id="CHAT2API_LIVE_BASE_URL" placeholder="https://chat2api.mv3.cn" /><div class="hint">填写 Chat2API 服务根地址，不要填写 /v1/audio/realtime。</div></div><div class="field full"><label>API Key <span id="CHAT2API_LIVE_KEY_STATE" class="badge">未配置</span></label><input id="CHAT2API_LIVE_API_KEY" type="password" placeholder="留空保留已保存的 Key" /><div class="hint">Key 只保存在服务器运行时配置文件中；读取接口不会回显明文。</div></div><div class="field full"><label>Client ID（可选）</label><input id="CHAT2API_LIVE_CLIENT_ID" placeholder="只有多个 Chat2API Chrome 扩展同时在线时才需要固定" /></div></div><div id="chat2apiLiveStatus" class="status" style="margin-top:14px">等待读取配置</div>';
+    if (oldEconomyCard) page.insertBefore(chat, oldEconomyCard);
+    else page.appendChild(chat);
+
+    const native = document.createElement("div");
+    native.id = "nativeLiveUnifiedCard";
+    native.className = "card";
+    native.innerHTML = '<div class="toolbar"><div><h3 style="margin:0 0 5px">Qwen Native Live</h3><div class="hint">Qwen Audio / Qwen3.5 Omni 的端到端实时语音。与 ChatGPT Live 是并列 Provider，不再混在 Cloud Audio 页面。</div></div><button class="btn primary" id="saveNativeUnifiedBtn" type="button">保存 Native Live</button></div><div class="grid"><div class="field"><label>Native Live</label><select id="QWEN_OMNI_REALTIME_ENABLED"><option value="true">开启</option><option value="false">关闭</option></select></div><div class="field"><label>默认模型</label><select id="QWEN_OMNI_REALTIME_MODEL"><option value="qwen-audio-3.0-realtime-plus">qwen-audio-3.0-realtime-plus</option><option value="qwen-audio-3.0-realtime-flash">qwen-audio-3.0-realtime-flash</option><option value="qwen3.5-omni-plus-realtime">qwen3.5-omni-plus-realtime</option><option value="qwen3.5-omni-flash-realtime">qwen3.5-omni-flash-realtime</option></select></div><div class="field full"><label>Realtime WebSocket Base URL</label><input id="QWEN_OMNI_REALTIME_BASE_URL" placeholder="留空复用 DashScope 默认实时地址" /></div><div class="field"><label>服务器默认音色</label><input id="QWEN_OMNI_REALTIME_VOICE" placeholder="longanqian" /></div><div class="field"><label>Turn Detection</label><select id="QWEN_OMNI_REALTIME_TURN_DETECTION"><option value="smart_turn">Smart Turn</option><option value="server_vad">Server VAD</option><option value="semantic_vad">Semantic VAD</option></select></div><div class="field"><label>VAD Threshold</label><input id="QWEN_OMNI_REALTIME_VAD_THRESHOLD" type="number" min="-1" max="1" step="0.05" /></div><div class="field"><label>静音结束窗口(ms)</label><input id="QWEN_OMNI_REALTIME_SILENCE_MS" type="number" min="200" max="6000" step="50" /></div></div><div id="nativeLiveUnifiedStatus" class="status" style="margin-top:14px">等待读取配置</div>';
+    if (oldEconomyCard) page.insertBefore(native, oldEconomyCard);
+    else page.appendChild(native);
+
+    if (oldEconomyCard && !$("economyUnifiedTitle")) {
+      const title = document.createElement("div");
+      title.id = "economyUnifiedTitle";
+      title.innerHTML = '<div class="toolbar"><div><h3 style="margin:0 0 5px">Economy Live</h3><div class="hint">流式 ASR → 文本 LLM Provider Pool → TTS。文本模型和故障切换仍在“文本 LLM”页面统一管理。</div></div></div>';
+      oldEconomyCard.insertBefore(title, oldEconomyCard.firstChild);
+    }
+
+    $("saveChat2ApiLiveBtn").onclick = saveChat2ApiLive;
+    $("checkChat2ApiLiveBtn").onclick = checkRealtimeAvailability;
+    $("saveNativeUnifiedBtn").onclick = saveNativeLive;
+  }
+
+  function setValue(id, value) {
+    const el = $(id);
+    if (el) el.value = String(value == null ? "" : value);
+  }
+
+  function setLiveStatus(id, text, ok) {
+    const el = $(id);
+    if (!el) return;
+    el.textContent = text;
+    el.className = "status" + (ok === true ? " ok" : ok === false ? " bad" : "");
+  }
+
+  async function loadRealtimeConfig() {
+    installRealtimeConsole();
+    const data = await jsonRequest("/admin/api/config", { headers: authHeaders() });
+    const values = data.values || {};
+    const secrets = data.secrets || {};
+    setValue("CHAT2API_LIVE_ENABLED", values.CHAT2API_LIVE_ENABLED || "false");
+    setValue("CHAT2API_LIVE_BASE_URL", values.CHAT2API_LIVE_BASE_URL || "https://chat2api.mv3.cn");
+    setValue("CHAT2API_LIVE_MODEL", values.CHAT2API_LIVE_MODEL || "gpt-live");
+    setValue("CHAT2API_LIVE_CLIENT_ID", values.CHAT2API_LIVE_CLIENT_ID || "");
+    const chatKeyConfigured = Boolean(secrets.CHAT2API_LIVE_API_KEY && secrets.CHAT2API_LIVE_API_KEY.configured);
+    if ($("CHAT2API_LIVE_KEY_STATE")) {
+      $("CHAT2API_LIVE_KEY_STATE").textContent = chatKeyConfigured ? "已配置" : "未配置";
+      $("CHAT2API_LIVE_KEY_STATE").className = "badge " + (chatKeyConfigured ? "good" : "");
+    }
+    const chatEnabled = values.CHAT2API_LIVE_ENABLED === "true";
+    setLiveStatus("chat2apiLiveStatus", chatEnabled
+      ? (chatKeyConfigured ? "配置已启用。正在检查 App 能力接口…" : "已开启，但 API Key 尚未配置。")
+      : "当前关闭。开启并保存后，新安装 App 会优先选择 ChatGPT Live。", chatEnabled && chatKeyConfigured ? undefined : !chatEnabled ? undefined : false);
+
+    setValue("QWEN_OMNI_REALTIME_ENABLED", values.QWEN_OMNI_REALTIME_ENABLED || "false");
+    setValue("QWEN_OMNI_REALTIME_BASE_URL", values.QWEN_OMNI_REALTIME_BASE_URL || "");
+    setValue("QWEN_OMNI_REALTIME_MODEL", values.QWEN_OMNI_REALTIME_MODEL || "qwen-audio-3.0-realtime-plus");
+    setValue("QWEN_OMNI_REALTIME_VOICE", values.QWEN_OMNI_REALTIME_VOICE || "longanqian");
+    setValue("QWEN_OMNI_REALTIME_TURN_DETECTION", values.QWEN_OMNI_REALTIME_TURN_DETECTION || "smart_turn");
+    setValue("QWEN_OMNI_REALTIME_VAD_THRESHOLD", values.QWEN_OMNI_REALTIME_VAD_THRESHOLD || "0.2");
+    setValue("QWEN_OMNI_REALTIME_SILENCE_MS", values.QWEN_OMNI_REALTIME_SILENCE_MS || "500");
+    setLiveStatus("nativeLiveUnifiedStatus", values.QWEN_OMNI_REALTIME_ENABLED === "true" ? "Native Live 已开启。" : "Native Live 已关闭。", values.QWEN_OMNI_REALTIME_ENABLED === "true" ? true : undefined);
+    realtimeLoaded = true;
+    await checkRealtimeAvailability(false);
+  }
+
+  async function saveChat2ApiLive() {
+    setLiveStatus("chat2apiLiveStatus", "正在保存 ChatGPT Live 配置…");
+    try {
+      const body = {
+        CHAT2API_LIVE_ENABLED: $("CHAT2API_LIVE_ENABLED").value,
+        CHAT2API_LIVE_BASE_URL: $("CHAT2API_LIVE_BASE_URL").value.trim() || "https://chat2api.mv3.cn",
+        CHAT2API_LIVE_MODEL: $("CHAT2API_LIVE_MODEL").value,
+        CHAT2API_LIVE_CLIENT_ID: $("CHAT2API_LIVE_CLIENT_ID").value.trim() || null,
+      };
+      const key = $("CHAT2API_LIVE_API_KEY").value.trim();
+      if (key) body.CHAT2API_LIVE_API_KEY = key;
+      await jsonRequest("/admin/api/config", { method: "PUT", headers: authHeaders(), body: JSON.stringify(body) });
+      $("CHAT2API_LIVE_API_KEY").value = "";
+      await loadRealtimeConfig();
+      setLiveStatus("chat2apiLiveStatus", "保存成功。新建立的会话会立即读取最新 Chat2API Live 配置。", true);
+    } catch (error) {
+      setLiveStatus("chat2apiLiveStatus", "保存失败：" + error.message, false);
+    }
+  }
+
+  async function saveNativeLive() {
+    setLiveStatus("nativeLiveUnifiedStatus", "正在保存 Native Live 配置…");
+    try {
+      const body = {
+        QWEN_OMNI_REALTIME_ENABLED: $("QWEN_OMNI_REALTIME_ENABLED").value,
+        QWEN_OMNI_REALTIME_BASE_URL: $("QWEN_OMNI_REALTIME_BASE_URL").value.trim() || null,
+        QWEN_OMNI_REALTIME_MODEL: $("QWEN_OMNI_REALTIME_MODEL").value,
+        QWEN_OMNI_REALTIME_VOICE: $("QWEN_OMNI_REALTIME_VOICE").value.trim(),
+        QWEN_OMNI_REALTIME_TURN_DETECTION: $("QWEN_OMNI_REALTIME_TURN_DETECTION").value,
+        QWEN_OMNI_REALTIME_VAD_THRESHOLD: $("QWEN_OMNI_REALTIME_VAD_THRESHOLD").value,
+        QWEN_OMNI_REALTIME_SILENCE_MS: $("QWEN_OMNI_REALTIME_SILENCE_MS").value,
+      };
+      await jsonRequest("/admin/api/config", { method: "PUT", headers: authHeaders(), body: JSON.stringify(body) });
+      await loadRealtimeConfig();
+      setLiveStatus("nativeLiveUnifiedStatus", "保存成功。新建立的 Native Live 会话会使用最新设置。", true);
+    } catch (error) {
+      setLiveStatus("nativeLiveUnifiedStatus", "保存失败：" + error.message, false);
+    }
+  }
+
+  async function checkRealtimeAvailability(showWorking = true) {
+    if (showWorking) setLiveStatus("chat2apiLiveStatus", "正在检查 Gateway 与 ChatGPT Live 可用性…");
+    try {
+      const response = await fetch("/v1/mobile/capabilities", { cache: "no-store" });
+      if (!response.ok) throw new Error("Capabilities HTTP " + response.status);
+      const data = await response.json();
+      const modes = Array.isArray(data.experienceModes) ? data.experienceModes : [];
+      const chat = modes.find((item) => item && item.id === "chat2api_live");
+      const native = modes.find((item) => item && (item.id === "native_plus" || item.id === "native_flash") && item.engine === "omni_realtime");
+      const chatAvailable = Boolean(chat && chat.engine === "omni_realtime" && !String(chat.title || "").includes("未启用"));
+      setLiveStatus("summaryChat2Api", chatAvailable ? "可用 · App 可选择 ChatGPT Live" : "未就绪", chatAvailable);
+      setLiveStatus("summaryNative", native ? "可用" : "未启用 / 未配置", native ? true : undefined);
+      if ($("overviewRemote")) $("overviewRemote").textContent = chatAvailable ? "已就绪" : "未就绪";
+      if (chatAvailable) setLiveStatus("chat2apiLiveStatus", "可用：Gateway 已把 ChatGPT Live 暴露为实时体验。真正的 ChatGPT Voice ready 状态请在会话诊断中确认。", true);
+      else setLiveStatus("chat2apiLiveStatus", "当前未就绪：请确认已开启 ChatGPT Live、API Key 已保存，并且 Chat2API 服务可用。", false);
+    } catch (error) {
+      setLiveStatus("summaryChat2Api", "检查失败", false);
+      setLiveStatus("chat2apiLiveStatus", "可用性检查失败：" + error.message, false);
     }
   }
 
@@ -146,16 +359,21 @@ export const ADMIN_OPERATIONS_UI = String.raw`(() => {
     const app = $("app");
     if (!app || typeof MutationObserver === "undefined") return;
     const observer = new MutationObserver(() => {
-      if (!app.classList.contains("hidden") && !operationsLoaded) {
-        loadOperations().catch(() => undefined);
+      if (!app.classList.contains("hidden")) {
+        if (!operationsLoaded) loadOperations().catch(() => undefined);
+        if (!realtimeLoaded) loadRealtimeConfig().catch(() => undefined);
       }
     });
     observer.observe(app, { attributes: true, attributeFilter: ["class"] });
   }
 
   async function bootstrap() {
+    installUnifiedNavigation();
+    installRealtimeConsole();
     installCards();
     watchForSuccessfulLogin();
+    $("reloadBtn") && $("reloadBtn").addEventListener("click", () => setTimeout(() => { loadRealtimeConfig().catch(() => undefined); }, 100));
+    document.querySelector('[data-route="dashscope"]') && document.querySelector('[data-route="dashscope"]').addEventListener("click", () => setTimeout(() => { loadRealtimeConfig().catch(() => undefined); }, 50));
     let status;
     try {
       status = await jsonRequest("/admin/api/operations/auth-status");
@@ -179,6 +397,7 @@ export const ADMIN_OPERATIONS_UI = String.raw`(() => {
 
     if (currentToken) {
       loadOperations().catch(() => undefined);
+      loadRealtimeConfig().catch(() => undefined);
     }
   }
 
