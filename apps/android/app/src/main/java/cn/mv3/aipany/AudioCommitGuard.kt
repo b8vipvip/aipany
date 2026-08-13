@@ -41,11 +41,13 @@ class AudioCommitGuard(
         lastCommitAtMs = nowMs
         awaitingTranscript = true
         awaitingSinceMs = nowMs
+        LiveLatencyTracker.endpoint(nowMs)
         return Decision(true)
     }
 
     @Synchronized
     fun resolveTranscript() {
+        if (awaitingTranscript) LiveLatencyTracker.transcript()
         awaitingTranscript = false
         awaitingSinceMs = 0L
     }
@@ -55,5 +57,6 @@ class AudioCommitGuard(
         awaitingTranscript = false
         awaitingSinceMs = 0L
         lastCommitAtMs = Long.MIN_VALUE
+        LiveLatencyTracker.reset()
     }
 }
