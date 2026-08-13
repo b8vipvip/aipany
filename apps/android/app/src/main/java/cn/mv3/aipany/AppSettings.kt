@@ -22,11 +22,15 @@ data class AppSettings(
 
     companion object {
         private const val PREFS = "aipany_settings"
+        private const val EXPERIENCE_MODE_KEY = "experience_mode"
+
+        fun hasPersistedExperienceMode(context: Context): Boolean =
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).contains(EXPERIENCE_MODE_KEY)
 
         fun load(context: Context): AppSettings {
             val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             return AppSettings(
-                experienceMode = prefs.getString("experience_mode", "native_plus") ?: "native_plus",
+                experienceMode = prefs.getString(EXPERIENCE_MODE_KEY, "native_plus") ?: "native_plus",
                 voiceId = prefs.getString("voice_id", "longanqian") ?: "longanqian",
                 interactionMode = prefs.getString("interaction_mode", "auto") ?: "auto",
                 socialProactivity = prefs.getFloat("social_proactivity", 0.45f).coerceIn(0f, 1f),
@@ -39,7 +43,7 @@ data class AppSettings(
 
         fun save(context: Context, value: AppSettings) {
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-                .putString("experience_mode", value.experienceMode)
+                .putString(EXPERIENCE_MODE_KEY, value.experienceMode)
                 .putString("voice_id", value.voiceId)
                 .putString("interaction_mode", value.interactionMode)
                 .putFloat("social_proactivity", value.socialProactivity)
