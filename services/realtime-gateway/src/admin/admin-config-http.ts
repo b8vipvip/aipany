@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { ADMIN_CLIENT_DIAGNOSTICS_UI } from "./admin-client-diagnostics-ui.js";
 import { ADMIN_CONFIG_PAGE } from "./admin-config-page.js";
 import { ADMIN_FAILOVER_UI } from "./admin-failover-ui.js";
 import { ADMIN_OBSERVABILITY_UI } from "./admin-observability-ui.js";
@@ -7,6 +8,8 @@ import { decryptConfigBackup, encryptConfigBackup } from "./config-backup.js";
 import { runAdminE2eTest } from "./e2e-test-runner.js";
 import { benchmarkRelayProvider } from "./relay-model-tester.js";
 import { RuntimeApiConfigStore } from "./runtime-api-config-store.js";
+import { handleMobileDiagnosticReportHttp } from "../mobile/client-diagnostic-report-http.js";
+import { clientDiagnosticReportStore } from "../observability/client-diagnostic-report-store.js";
 import { GitHubObservabilitySync } from "../observability/github-observability-sync.js";
 import type { RealtimeObservabilityStore } from "../observability/realtime-observability.js";
 import { OperationsControlStore } from "../operations/operations-control-store.js";
@@ -26,6 +29,7 @@ export async function handleAdminConfigHttp(
   observability?: RealtimeObservabilityStore,
 ): Promise<boolean> {
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+  if (await handleMobileDiagnosticReportHttp(request, response, observability)) return true;
   await operationsControlStore.load();
 
   if (request.method === "GET" && (url.pathname === "/admin" || url.pathname === "/admin/")) {
@@ -64,6 +68,16 @@ export async function handleAdminConfigHttp(
     return true;
   }
 
+  if (request.method === "GET" && url.pathname === "/admin/client-diagnostics-ui.js") {
+    response.writeHead(200, {
+      "Content-Type": "application/javascript; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+    });
+    response.end(ADMIN_CLIENT_DIAGNOSTICS_UI);
+    return true;
+  }
+
   if (request.method === "GET" && (url.pathname === "/admin/config" || url.pathname.startsWith("/admin/config/"))) {
     response.writeHead(200, {
       "Content-Type": "text/html; charset=utf-8",
@@ -73,7 +87,7 @@ export async function handleAdminConfigHttp(
     });
     response.end(ADMIN_CONFIG_PAGE.replace(
       "</body>",
-      '<script src="/admin/failover-ui.js"></script><script src="/admin/observability-ui.js"></script><script src="/admin/operations-ui.js"></script></body>',
+      '<script src="/admin/failover-ui.js"></script><script src="/admin/observability-ui.js"></script><script src="/admin/operations-ui.js"></script><script src="/admin/client-diagnostics-ui.js"></script></body>',
     ));
     return true;
   }
@@ -81,7 +95,8 @@ export async function handleAdminConfigHttp(
   const isConfigApi = url.pathname.startsWith("/admin/api/config");
   const isObservabilityApi = url.pathname.startsWith("/admin/api/observability");
   const isOperationsApi = url.pathname.startsWith("/admin/api/operations");
-  if (!isConfigApi && !isObservabilityApi && !isOperationsApi) return false;
+  const isClientDiagnosticsApi = url.pathname.startsWith("/admin/api/client-diagnostics");
+  if (!isConfigApi && !isObservabilityApi && !isOperationsApi && !isClientDiagnosticsApi) return false;
   response.setHeader("Cache-Control", "no-store");
   response.setHeader("Content-Type", "application/json; charset=utf-8");
 
@@ -100,6 +115,37 @@ export async function handleAdminConfigHttp(
   if (!authorized) {
     response.writeHead(401, { "WWW-Authenticate": "Bearer" });
     response.end(JSON.stringify({ error: "unauthorized" }));
+    return true;
+  }
+
+  if (isClientDiagnosticsApi) {
+    if (request.method === "GET" && url.pathname === "/admin/api/client-diagnostics") {
+      const limit = parseLimit(url.searchParams.get("limit"), 50, 200);
+      response.writeHead(200);
+      response.end(JSON.stringify({ reports: await clientDiagnosticReportStore.list(limit) }));
+      return true;
+    }
+
+    const download = /^\/admin\/api\/client-diagnostics\/([^/]+)\/download$/.exec(url.pathname);
+    if (request.method === "GET" && download) {
+      try {
+        const id = decodeURIComponent(download[1] ?? "");
+        const report = await clientDiagnosticReportStore.read(id);
+        response.writeHead(200, {
+          "Content-Disposition": `attachment; filename="aipany-client-diagnostics-${id}.json"`,
+          "Content-Type": "application/json; charset=utf-8",
+        });
+        response.end(`${JSON.stringify(report, null, 2)}\n`);
+      } catch (error) {
+        const code = error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code ?? "") : "";
+        response.writeHead(code === "ENOENT" ? 404 : 400);
+        response.end(JSON.stringify({ error: code === "ENOENT" ? "not_found" : "invalid_report_id", message: formatError(error) }));
+      }
+      return true;
+    }
+
+    response.writeHead(405, { Allow: "GET" });
+    response.end(JSON.stringify({ error: "method_not_allowed" }));
     return true;
   }
 

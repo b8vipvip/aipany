@@ -76,6 +76,34 @@ fun diagnoseLiveChain(
         )
     }
 
+    val authRejectedEvidence = sequenceOf(snapshot.upstreamDetail, snapshot.lastError)
+        .plus(recentUpstream.asSequence().map { it.detail })
+        .firstOrNull { detail ->
+            val normalized = detail.lowercase()
+            normalized.contains("unexpected server response: 401") ||
+                normalized.contains("unexpected server response: 403") ||
+                normalized.contains("websocket 401") ||
+                normalized.contains("websocket 403") ||
+                normalized.contains("4401") ||
+                normalized.contains("unauthorized api key") ||
+                normalized.contains("invalid or unauthorized api key")
+        }
+    if (authRejectedEvidence != null) {
+        return assessment(
+            layer = DiagnosticLayer.CHAT2API_BRIDGE,
+            severity = DiagnosticSeverity.ERROR,
+            confidence = 98,
+            title = "Chat2API WebSocket 鉴权/访问被拒绝",
+            summary = "Aipany 已到达 Chat2API WebSocket 入口，但握手阶段被 401/403 拒绝，尚未进入 ChatGPT Voice 会话。最常见原因是 Chat2API API Key 不匹配，或受限 Key 缺少 audio/chat 权限。",
+            evidence = listOf(authRejectedEvidence.take(220), "GPT-Live：${snapshot.upstreamState}", "最近 GPT-Live 就绪：${if (snapshot.lastReadyAtMs > 0L) "有" else "无"}"),
+            actions = listOf(
+                "在 Aipany 控制台重新保存与 Chat2API 服务端一致的 API Key",
+                "若使用受限 API Key，确认它至少具有 audio 或 chat scope",
+                "Key 确认无误仍返回 403 时，再检查 Chat2API 前置反向代理/WAF 是否允许 WebSocket Upgrade",
+            ),
+        )
+    }
+
     val heartbeatEvidence = sequenceOf(snapshot.upstreamDetail, snapshot.lastError)
         .plus(recentUpstream.asSequence().map { it.detail })
         .any { it.contains("心跳") || it.contains("heartbeat", ignoreCase = true) || it.contains("pong", ignoreCase = true) }
