@@ -9,6 +9,11 @@ import {
 
 export const MANAGED_RUNTIME_KEYS = [
   "AIPANY_REALTIME_ENGINE",
+  "CHAT2API_LIVE_ENABLED",
+  "CHAT2API_LIVE_BASE_URL",
+  "CHAT2API_LIVE_API_KEY",
+  "CHAT2API_LIVE_MODEL",
+  "CHAT2API_LIVE_CLIENT_ID",
   "DASHSCOPE_API_KEY",
   "DASHSCOPE_WORKSPACE_ID",
   "DASHSCOPE_ASR_WS_BASE_URL",
@@ -44,6 +49,7 @@ export type ManagedRuntimeKey = typeof MANAGED_RUNTIME_KEYS[number];
 export type RuntimeApiConfig = Partial<Record<ManagedRuntimeKey, string>>;
 
 const SECRET_KEYS = new Set<ManagedRuntimeKey>([
+  "CHAT2API_LIVE_API_KEY",
   "DASHSCOPE_API_KEY",
   "QWEN_OMNI_API_KEY",
   "LLM_API_KEY",
@@ -51,6 +57,7 @@ const SECRET_KEYS = new Set<ManagedRuntimeKey>([
 ]);
 
 const BOOLEAN_KEYS = new Set<ManagedRuntimeKey>([
+  "CHAT2API_LIVE_ENABLED",
   "QWEN_OMNI_REALTIME_ENABLED",
   "CLOUD_AUDIO_INTELLIGENCE_ENABLED",
   "CLOUD_AUDIO_ENVIRONMENT_ENABLED",
@@ -201,8 +208,15 @@ function sanitize(input: Record<string, unknown>): RuntimeApiConfig {
 
 function validateValue(key: ManagedRuntimeKey, value: string): string {
   if (BOOLEAN_KEYS.has(key) && value !== "true" && value !== "false") throw new Error(`${key} 只能是 true 或 false`);
-  if (["DASHSCOPE_ASR_WS_BASE_URL", "DASHSCOPE_TTS_WS_BASE_URL", "QWEN_OMNI_BASE_URL", "QWEN_OMNI_REALTIME_BASE_URL", "LLM_BASE_URL", "REMOTE_SEPARATION_BASE_URL"].includes(key)) {
+  if (["CHAT2API_LIVE_BASE_URL", "DASHSCOPE_ASR_WS_BASE_URL", "DASHSCOPE_TTS_WS_BASE_URL", "QWEN_OMNI_BASE_URL", "QWEN_OMNI_REALTIME_BASE_URL", "LLM_BASE_URL", "REMOTE_SEPARATION_BASE_URL"].includes(key)) {
     try { new URL(value); } catch { throw new Error(`${key} 不是有效 URL`); }
+  }
+  if (key === "CHAT2API_LIVE_BASE_URL") {
+    const protocol = new URL(value).protocol;
+    if (!["http:", "https:", "ws:", "wss:"].includes(protocol)) throw new Error("CHAT2API_LIVE_BASE_URL 只支持 http(s) / ws(s)");
+  }
+  if (key === "CHAT2API_LIVE_MODEL" && !["gpt-live", "gpt-live-mini"].includes(value)) {
+    throw new Error("CHAT2API_LIVE_MODEL 只能是 gpt-live / gpt-live-mini");
   }
   if (key === "AIPANY_REALTIME_ENGINE" && !["auto", "cascaded", "omni_realtime"].includes(value)) {
     throw new Error("AIPANY_REALTIME_ENGINE 只能是 auto / cascaded / omni_realtime");
