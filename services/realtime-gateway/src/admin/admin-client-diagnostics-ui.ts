@@ -29,7 +29,7 @@ export const ADMIN_CLIENT_DIAGNOSTICS_UI = String.raw`(() => {
       if (!response.ok) throw new Error(data.message || data.error || ("HTTP " + response.status));
       const reports = Array.isArray(data.reports) ? data.reports : [];
       renderReports(reports);
-      setStatus(reports.length ? `已加载最近 ${reports.length} 份客户端诊断报告。` : "暂无客户端自动上传的诊断报告。", true);
+      setStatus(reports.length ? "已加载最近 " + reports.length + " 份客户端诊断报告。" : "暂无客户端自动上传的诊断报告。", true);
     } catch (error) {
       setStatus("客户端诊断报告读取失败：" + (error && error.message ? error.message : String(error)), false);
     } finally {
