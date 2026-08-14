@@ -57,6 +57,7 @@ object LiveDiagnosticsStore {
     fun recordGateway(message: String, nowMs: Long = System.currentTimeMillis()) {
         val clean = message.trim().take(240)
         if (clean.isBlank()) return
+        val severe = clean.startsWith("连接失败") || clean == "连接已断开" || clean.startsWith("Bootstrap 失败")
         synchronized(lock) {
             gatewayState = clean
             updatedAtMs = nowMs
@@ -68,10 +69,9 @@ object LiveDiagnosticsStore {
                     detail = clean,
                 ),
             )
-            if (clean.startsWith("连接失败") || clean == "连接已断开" || clean.startsWith("Bootstrap 失败")) {
-                lastError = clean
-            }
+            if (severe) lastError = clean
         }
+        if (severe) LiveDiagnosticAutoUploader.schedule("gateway_error")
     }
 
     fun recordUpstream(
@@ -106,6 +106,9 @@ object LiveDiagnosticsStore {
                     model = this.model,
                 ),
             )
+        }
+        if (cleanState == "degraded" || cleanState == "unavailable") {
+            LiveDiagnosticAutoUploader.schedule("upstream_$cleanState")
         }
     }
 
@@ -146,6 +149,9 @@ object LiveDiagnosticsStore {
                     model = model,
                 ),
             )
+        }
+        if (cleanState == "audio_timeout" || cleanState == "audio_failed") {
+            LiveDiagnosticAutoUploader.schedule("android_$cleanState")
         }
     }
 
