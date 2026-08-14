@@ -8,6 +8,7 @@ class AipanyApplication : Application(), Application.ActivityLifecycleCallbacks 
     override fun onCreate() {
         super.onCreate()
         ClientCrashDiagnostics.install(this)
+        LiveDiagnosticAutoUploader.initialize(this)
         registerActivityLifecycleCallbacks(this)
     }
 
