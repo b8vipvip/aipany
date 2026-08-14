@@ -34,6 +34,8 @@ interface QwenOmniRealtimeEvents {
   close: [code: number, reason: string];
 }
 
+type Chat2ApiCancelReason = "barge_in" | "client_cancel";
+
 /**
  * Native realtime provider facade.
  *
@@ -49,6 +51,7 @@ export class QwenOmniRealtimeClient extends EventEmitter<QwenOmniRealtimeEvents>
   private closed = false;
   private responding = false;
   private currentResponseId?: string;
+  private chat2ApiCancelPending?: { responseId: string; reason: Chat2ApiCancelReason };
   private readonly responseText = new Map<string, string>();
   private audioBuffer = Buffer.alloc(0);
   private connectPromise?: Promise<void>;
@@ -258,7 +261,7 @@ export class QwenOmniRealtimeClient extends EventEmitter<QwenOmniRealtimeEvents>
 
   cancelResponse(): void {
     if (this.chat2api) {
-      this.chat2api.cancelResponse();
+      this.cancelChat2ApiResponse("client_cancel");
       return;
     }
     if (!this.responding) return;
@@ -283,6 +286,7 @@ export class QwenOmniRealtimeClient extends EventEmitter<QwenOmniRealtimeEvents>
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.chat2ApiCancelPending = undefined;
     if (this.chat2api) {
       this.chat2api.close();
       this.chat2api = undefined;
@@ -311,13 +315,17 @@ export class QwenOmniRealtimeClient extends EventEmitter<QwenOmniRealtimeEvents>
       this.ready = true;
       this.emit("ready");
     });
-    client.on("speechStarted", () => this.emit("speechStarted"));
+    client.on("speechStarted", () => {
+      this.emit("speechStarted");
+      this.cancelChat2ApiResponse("barge_in");
+    });
     client.on("speechStopped", () => this.emit("speechStopped"));
     client.on("transcriptDelta", (text) => this.emit("transcriptDelta", text));
     client.on("transcriptFinal", (text) => this.emit("transcriptFinal", text));
     client.on("responseCreated", (responseId) => {
       this.responding = true;
       this.currentResponseId = responseId;
+      this.chat2ApiCancelPending = undefined;
       this.responseText.set(responseId, "");
       this.emit("responseCreated", responseId);
     });
@@ -328,12 +336,17 @@ export class QwenOmniRealtimeClient extends EventEmitter<QwenOmniRealtimeEvents>
     client.on("audio", (responseId, audio) => this.emit("audio", responseId, audio));
     client.on("audioDone", (responseId) => this.emit("audioDone", responseId));
     client.on("interrupted", (responseId, reason) => {
+      const pendingReason = this.chat2ApiCancelPending?.responseId === responseId
+        ? this.chat2ApiCancelPending.reason
+        : undefined;
+      this.chat2ApiCancelPending = undefined;
       this.responding = false;
       if (this.currentResponseId === responseId) this.currentResponseId = undefined;
       this.responseText.delete(responseId);
-      this.emit("interrupted", responseId, reason);
+      this.emit("interrupted", responseId, pendingReason ?? reason);
     });
     client.on("responseDone", (responseId, text, status) => {
+      if (this.chat2ApiCancelPending?.responseId === responseId) this.chat2ApiCancelPending = undefined;
       this.responding = false;
       if (this.currentResponseId === responseId) this.currentResponseId = undefined;
       const finalText = text || this.responseText.get(responseId) || "";
@@ -342,10 +355,26 @@ export class QwenOmniRealtimeClient extends EventEmitter<QwenOmniRealtimeEvents>
     });
     client.on("error", (error) => this.emit("error", error));
     client.on("close", (code, reason) => {
+      this.chat2ApiCancelPending = undefined;
       this.ready = false;
       if (!this.closed) this.emit("close", code, reason);
     });
     await client.connect();
+  }
+
+  private cancelChat2ApiResponse(reason: Chat2ApiCancelReason): boolean {
+    const client = this.chat2api;
+    const responseId = this.currentResponseId;
+    if (!client || !this.responding || !responseId) return false;
+
+    if (this.chat2ApiCancelPending?.responseId === responseId) {
+      if (reason === "barge_in") this.chat2ApiCancelPending.reason = "barge_in";
+      return false;
+    }
+
+    this.chat2ApiCancelPending = { responseId, reason };
+    client.cancelResponse();
+    return true;
   }
 
   private flushAudio(): void {
